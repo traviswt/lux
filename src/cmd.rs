@@ -2276,56 +2276,147 @@ pub fn execute(
 }
 
 pub fn is_known_command(cmd: &[u8]) -> bool {
-    cmd_eq(cmd, b"SET") || cmd_eq(cmd, b"GET") || cmd_eq(cmd, b"DEL")
-        || cmd_eq(cmd, b"PING") || cmd_eq(cmd, b"ECHO") || cmd_eq(cmd, b"QUIT")
-        || cmd_eq(cmd, b"SETNX") || cmd_eq(cmd, b"SETEX") || cmd_eq(cmd, b"PSETEX")
-        || cmd_eq(cmd, b"GETSET") || cmd_eq(cmd, b"MGET") || cmd_eq(cmd, b"MSET")
-        || cmd_eq(cmd, b"STRLEN") || cmd_eq(cmd, b"EXISTS") || cmd_eq(cmd, b"INCR")
-        || cmd_eq(cmd, b"DECR") || cmd_eq(cmd, b"INCRBY") || cmd_eq(cmd, b"DECRBY")
-        || cmd_eq(cmd, b"APPEND") || cmd_eq(cmd, b"KEYS") || cmd_eq(cmd, b"SCAN")
-        || cmd_eq(cmd, b"TTL") || cmd_eq(cmd, b"PTTL") || cmd_eq(cmd, b"EXPIRE")
-        || cmd_eq(cmd, b"PEXPIRE") || cmd_eq(cmd, b"PERSIST") || cmd_eq(cmd, b"TYPE")
-        || cmd_eq(cmd, b"RENAME") || cmd_eq(cmd, b"DBSIZE") || cmd_eq(cmd, b"FLUSHDB")
-        || cmd_eq(cmd, b"FLUSHALL") || cmd_eq(cmd, b"LPUSH") || cmd_eq(cmd, b"RPUSH")
-        || cmd_eq(cmd, b"LPOP") || cmd_eq(cmd, b"RPOP") || cmd_eq(cmd, b"LLEN")
-        || cmd_eq(cmd, b"LRANGE") || cmd_eq(cmd, b"LINDEX") || cmd_eq(cmd, b"HSET")
-        || cmd_eq(cmd, b"HMSET") || cmd_eq(cmd, b"HGET") || cmd_eq(cmd, b"HMGET")
-        || cmd_eq(cmd, b"HDEL") || cmd_eq(cmd, b"HGETALL") || cmd_eq(cmd, b"HKEYS")
-        || cmd_eq(cmd, b"HVALS") || cmd_eq(cmd, b"HLEN") || cmd_eq(cmd, b"HEXISTS")
-        || cmd_eq(cmd, b"HINCRBY") || cmd_eq(cmd, b"SADD") || cmd_eq(cmd, b"SREM")
-        || cmd_eq(cmd, b"SMEMBERS") || cmd_eq(cmd, b"SISMEMBER") || cmd_eq(cmd, b"SCARD")
-        || cmd_eq(cmd, b"SUNION") || cmd_eq(cmd, b"SINTER") || cmd_eq(cmd, b"SDIFF")
-        || cmd_eq(cmd, b"SAVE") || cmd_eq(cmd, b"INFO") || cmd_eq(cmd, b"CONFIG")
-        || cmd_eq(cmd, b"CLIENT") || cmd_eq(cmd, b"SELECT") || cmd_eq(cmd, b"COMMAND")
-        || cmd_eq(cmd, b"GETDEL") || cmd_eq(cmd, b"GETEX") || cmd_eq(cmd, b"GETRANGE")
-        || cmd_eq(cmd, b"SUBSTR") || cmd_eq(cmd, b"SETRANGE") || cmd_eq(cmd, b"MSETNX")
-        || cmd_eq(cmd, b"UNLINK") || cmd_eq(cmd, b"EXPIREAT") || cmd_eq(cmd, b"PEXPIREAT")
-        || cmd_eq(cmd, b"EXPIRETIME") || cmd_eq(cmd, b"PEXPIRETIME")
-        || cmd_eq(cmd, b"LSET") || cmd_eq(cmd, b"LINSERT") || cmd_eq(cmd, b"LREM")
-        || cmd_eq(cmd, b"LTRIM") || cmd_eq(cmd, b"LPUSHX") || cmd_eq(cmd, b"RPUSHX")
-        || cmd_eq(cmd, b"LPOS") || cmd_eq(cmd, b"LMOVE") || cmd_eq(cmd, b"RPOPLPUSH")
-        || cmd_eq(cmd, b"HSETNX") || cmd_eq(cmd, b"HINCRBYFLOAT") || cmd_eq(cmd, b"HSTRLEN")
-        || cmd_eq(cmd, b"SPOP") || cmd_eq(cmd, b"SRANDMEMBER") || cmd_eq(cmd, b"SMOVE")
-        || cmd_eq(cmd, b"SMISMEMBER") || cmd_eq(cmd, b"SDIFFSTORE")
-        || cmd_eq(cmd, b"SINTERSTORE") || cmd_eq(cmd, b"SUNIONSTORE")
-        || cmd_eq(cmd, b"SINTERCARD") || cmd_eq(cmd, b"HRANDFIELD")
-        || cmd_eq(cmd, b"HSCAN") || cmd_eq(cmd, b"SSCAN") || cmd_eq(cmd, b"INCRBYFLOAT")
-        || cmd_eq(cmd, b"TIME") || cmd_eq(cmd, b"RENAMENX") || cmd_eq(cmd, b"RANDOMKEY")
-        || cmd_eq(cmd, b"HELLO") || cmd_eq(cmd, b"PSUBSCRIBE") || cmd_eq(cmd, b"PUNSUBSCRIBE")
-        || cmd_eq(cmd, b"COPY") || cmd_eq(cmd, b"FUNCTION") || cmd_eq(cmd, b"DEBUG")
-        || cmd_eq(cmd, b"WAIT") || cmd_eq(cmd, b"RESET") || cmd_eq(cmd, b"LATENCY")
-        || cmd_eq(cmd, b"SWAPDB") || cmd_eq(cmd, b"OBJECT") || cmd_eq(cmd, b"MEMORY")
-        || cmd_eq(cmd, b"BGSAVE") || cmd_eq(cmd, b"LASTSAVE") || cmd_eq(cmd, b"PUBLISH")
-        || cmd_eq(cmd, b"SUBSCRIBE") || cmd_eq(cmd, b"ZADD") || cmd_eq(cmd, b"ZSCORE")
-        || cmd_eq(cmd, b"ZRANK") || cmd_eq(cmd, b"ZREVRANK") || cmd_eq(cmd, b"ZREM")
-        || cmd_eq(cmd, b"ZCARD") || cmd_eq(cmd, b"ZRANGE") || cmd_eq(cmd, b"ZINCRBY")
-        || cmd_eq(cmd, b"ZCOUNT") || cmd_eq(cmd, b"ZPOPMIN") || cmd_eq(cmd, b"ZPOPMAX")
-        || cmd_eq(cmd, b"ZUNIONSTORE") || cmd_eq(cmd, b"ZINTERSTORE")
-        || cmd_eq(cmd, b"ZDIFFSTORE") || cmd_eq(cmd, b"ZSCAN") || cmd_eq(cmd, b"ZMSCORE")
-        || cmd_eq(cmd, b"ZLEXCOUNT") || cmd_eq(cmd, b"ZRANGEBYSCORE")
-        || cmd_eq(cmd, b"ZREVRANGEBYSCORE") || cmd_eq(cmd, b"ZRANGEBYLEX")
-        || cmd_eq(cmd, b"ZREVRANGEBYLEX") || cmd_eq(cmd, b"ZREMRANGEBYRANK")
-        || cmd_eq(cmd, b"ZREMRANGEBYSCORE") || cmd_eq(cmd, b"ZREMRANGEBYLEX")
+    cmd_eq(cmd, b"SET")
+        || cmd_eq(cmd, b"GET")
+        || cmd_eq(cmd, b"DEL")
+        || cmd_eq(cmd, b"PING")
+        || cmd_eq(cmd, b"ECHO")
+        || cmd_eq(cmd, b"QUIT")
+        || cmd_eq(cmd, b"SETNX")
+        || cmd_eq(cmd, b"SETEX")
+        || cmd_eq(cmd, b"PSETEX")
+        || cmd_eq(cmd, b"GETSET")
+        || cmd_eq(cmd, b"MGET")
+        || cmd_eq(cmd, b"MSET")
+        || cmd_eq(cmd, b"STRLEN")
+        || cmd_eq(cmd, b"EXISTS")
+        || cmd_eq(cmd, b"INCR")
+        || cmd_eq(cmd, b"DECR")
+        || cmd_eq(cmd, b"INCRBY")
+        || cmd_eq(cmd, b"DECRBY")
+        || cmd_eq(cmd, b"APPEND")
+        || cmd_eq(cmd, b"KEYS")
+        || cmd_eq(cmd, b"SCAN")
+        || cmd_eq(cmd, b"TTL")
+        || cmd_eq(cmd, b"PTTL")
+        || cmd_eq(cmd, b"EXPIRE")
+        || cmd_eq(cmd, b"PEXPIRE")
+        || cmd_eq(cmd, b"PERSIST")
+        || cmd_eq(cmd, b"TYPE")
+        || cmd_eq(cmd, b"RENAME")
+        || cmd_eq(cmd, b"DBSIZE")
+        || cmd_eq(cmd, b"FLUSHDB")
+        || cmd_eq(cmd, b"FLUSHALL")
+        || cmd_eq(cmd, b"LPUSH")
+        || cmd_eq(cmd, b"RPUSH")
+        || cmd_eq(cmd, b"LPOP")
+        || cmd_eq(cmd, b"RPOP")
+        || cmd_eq(cmd, b"LLEN")
+        || cmd_eq(cmd, b"LRANGE")
+        || cmd_eq(cmd, b"LINDEX")
+        || cmd_eq(cmd, b"HSET")
+        || cmd_eq(cmd, b"HMSET")
+        || cmd_eq(cmd, b"HGET")
+        || cmd_eq(cmd, b"HMGET")
+        || cmd_eq(cmd, b"HDEL")
+        || cmd_eq(cmd, b"HGETALL")
+        || cmd_eq(cmd, b"HKEYS")
+        || cmd_eq(cmd, b"HVALS")
+        || cmd_eq(cmd, b"HLEN")
+        || cmd_eq(cmd, b"HEXISTS")
+        || cmd_eq(cmd, b"HINCRBY")
+        || cmd_eq(cmd, b"SADD")
+        || cmd_eq(cmd, b"SREM")
+        || cmd_eq(cmd, b"SMEMBERS")
+        || cmd_eq(cmd, b"SISMEMBER")
+        || cmd_eq(cmd, b"SCARD")
+        || cmd_eq(cmd, b"SUNION")
+        || cmd_eq(cmd, b"SINTER")
+        || cmd_eq(cmd, b"SDIFF")
+        || cmd_eq(cmd, b"SAVE")
+        || cmd_eq(cmd, b"INFO")
+        || cmd_eq(cmd, b"CONFIG")
+        || cmd_eq(cmd, b"CLIENT")
+        || cmd_eq(cmd, b"SELECT")
+        || cmd_eq(cmd, b"COMMAND")
+        || cmd_eq(cmd, b"GETDEL")
+        || cmd_eq(cmd, b"GETEX")
+        || cmd_eq(cmd, b"GETRANGE")
+        || cmd_eq(cmd, b"SUBSTR")
+        || cmd_eq(cmd, b"SETRANGE")
+        || cmd_eq(cmd, b"MSETNX")
+        || cmd_eq(cmd, b"UNLINK")
+        || cmd_eq(cmd, b"EXPIREAT")
+        || cmd_eq(cmd, b"PEXPIREAT")
+        || cmd_eq(cmd, b"EXPIRETIME")
+        || cmd_eq(cmd, b"PEXPIRETIME")
+        || cmd_eq(cmd, b"LSET")
+        || cmd_eq(cmd, b"LINSERT")
+        || cmd_eq(cmd, b"LREM")
+        || cmd_eq(cmd, b"LTRIM")
+        || cmd_eq(cmd, b"LPUSHX")
+        || cmd_eq(cmd, b"RPUSHX")
+        || cmd_eq(cmd, b"LPOS")
+        || cmd_eq(cmd, b"LMOVE")
+        || cmd_eq(cmd, b"RPOPLPUSH")
+        || cmd_eq(cmd, b"HSETNX")
+        || cmd_eq(cmd, b"HINCRBYFLOAT")
+        || cmd_eq(cmd, b"HSTRLEN")
+        || cmd_eq(cmd, b"SPOP")
+        || cmd_eq(cmd, b"SRANDMEMBER")
+        || cmd_eq(cmd, b"SMOVE")
+        || cmd_eq(cmd, b"SMISMEMBER")
+        || cmd_eq(cmd, b"SDIFFSTORE")
+        || cmd_eq(cmd, b"SINTERSTORE")
+        || cmd_eq(cmd, b"SUNIONSTORE")
+        || cmd_eq(cmd, b"SINTERCARD")
+        || cmd_eq(cmd, b"HRANDFIELD")
+        || cmd_eq(cmd, b"HSCAN")
+        || cmd_eq(cmd, b"SSCAN")
+        || cmd_eq(cmd, b"INCRBYFLOAT")
+        || cmd_eq(cmd, b"TIME")
+        || cmd_eq(cmd, b"RENAMENX")
+        || cmd_eq(cmd, b"RANDOMKEY")
+        || cmd_eq(cmd, b"HELLO")
+        || cmd_eq(cmd, b"PSUBSCRIBE")
+        || cmd_eq(cmd, b"PUNSUBSCRIBE")
+        || cmd_eq(cmd, b"COPY")
+        || cmd_eq(cmd, b"FUNCTION")
+        || cmd_eq(cmd, b"DEBUG")
+        || cmd_eq(cmd, b"WAIT")
+        || cmd_eq(cmd, b"RESET")
+        || cmd_eq(cmd, b"LATENCY")
+        || cmd_eq(cmd, b"SWAPDB")
+        || cmd_eq(cmd, b"OBJECT")
+        || cmd_eq(cmd, b"MEMORY")
+        || cmd_eq(cmd, b"BGSAVE")
+        || cmd_eq(cmd, b"LASTSAVE")
+        || cmd_eq(cmd, b"PUBLISH")
+        || cmd_eq(cmd, b"SUBSCRIBE")
+        || cmd_eq(cmd, b"ZADD")
+        || cmd_eq(cmd, b"ZSCORE")
+        || cmd_eq(cmd, b"ZRANK")
+        || cmd_eq(cmd, b"ZREVRANK")
+        || cmd_eq(cmd, b"ZREM")
+        || cmd_eq(cmd, b"ZCARD")
+        || cmd_eq(cmd, b"ZRANGE")
+        || cmd_eq(cmd, b"ZINCRBY")
+        || cmd_eq(cmd, b"ZCOUNT")
+        || cmd_eq(cmd, b"ZPOPMIN")
+        || cmd_eq(cmd, b"ZPOPMAX")
+        || cmd_eq(cmd, b"ZUNIONSTORE")
+        || cmd_eq(cmd, b"ZINTERSTORE")
+        || cmd_eq(cmd, b"ZDIFFSTORE")
+        || cmd_eq(cmd, b"ZSCAN")
+        || cmd_eq(cmd, b"ZMSCORE")
+        || cmd_eq(cmd, b"ZLEXCOUNT")
+        || cmd_eq(cmd, b"ZRANGEBYSCORE")
+        || cmd_eq(cmd, b"ZREVRANGEBYSCORE")
+        || cmd_eq(cmd, b"ZRANGEBYLEX")
+        || cmd_eq(cmd, b"ZREVRANGEBYLEX")
+        || cmd_eq(cmd, b"ZREMRANGEBYRANK")
+        || cmd_eq(cmd, b"ZREMRANGEBYSCORE")
+        || cmd_eq(cmd, b"ZREMRANGEBYLEX")
         || cmd_eq(cmd, b"AUTH")
 }
 
@@ -2334,46 +2425,106 @@ pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
         return Err("ERR no command".to_string());
     }
     let cmd = args[0];
-    let min = if cmd_eq(cmd, b"SET") || cmd_eq(cmd, b"GETSET") || cmd_eq(cmd, b"SETNX")
-        || cmd_eq(cmd, b"APPEND") || cmd_eq(cmd, b"EXPIRE") || cmd_eq(cmd, b"PEXPIRE")
-        || cmd_eq(cmd, b"HGET") || cmd_eq(cmd, b"HEXISTS") || cmd_eq(cmd, b"SISMEMBER")
-        || cmd_eq(cmd, b"LINDEX") || cmd_eq(cmd, b"GETRANGE") || cmd_eq(cmd, b"SUBSTR")
+    let min = if cmd_eq(cmd, b"SET")
+        || cmd_eq(cmd, b"GETSET")
+        || cmd_eq(cmd, b"SETNX")
+        || cmd_eq(cmd, b"APPEND")
+        || cmd_eq(cmd, b"EXPIRE")
+        || cmd_eq(cmd, b"PEXPIRE")
+        || cmd_eq(cmd, b"HGET")
+        || cmd_eq(cmd, b"HEXISTS")
+        || cmd_eq(cmd, b"SISMEMBER")
+        || cmd_eq(cmd, b"LINDEX")
+        || cmd_eq(cmd, b"GETRANGE")
+        || cmd_eq(cmd, b"SUBSTR")
     {
         3
-    } else if cmd_eq(cmd, b"GET") || cmd_eq(cmd, b"DEL") || cmd_eq(cmd, b"EXISTS")
-        || cmd_eq(cmd, b"INCR") || cmd_eq(cmd, b"DECR") || cmd_eq(cmd, b"STRLEN")
-        || cmd_eq(cmd, b"TTL") || cmd_eq(cmd, b"PTTL") || cmd_eq(cmd, b"TYPE")
-        || cmd_eq(cmd, b"PERSIST") || cmd_eq(cmd, b"KEYS") || cmd_eq(cmd, b"LLEN")
-        || cmd_eq(cmd, b"LPOP") || cmd_eq(cmd, b"RPOP") || cmd_eq(cmd, b"HGETALL")
-        || cmd_eq(cmd, b"HKEYS") || cmd_eq(cmd, b"HVALS") || cmd_eq(cmd, b"HLEN")
-        || cmd_eq(cmd, b"SMEMBERS") || cmd_eq(cmd, b"SCARD") || cmd_eq(cmd, b"ZCARD")
-        || cmd_eq(cmd, b"SCAN") || cmd_eq(cmd, b"ECHO") || cmd_eq(cmd, b"GETDEL")
+    } else if cmd_eq(cmd, b"GET")
+        || cmd_eq(cmd, b"DEL")
+        || cmd_eq(cmd, b"EXISTS")
+        || cmd_eq(cmd, b"INCR")
+        || cmd_eq(cmd, b"DECR")
+        || cmd_eq(cmd, b"STRLEN")
+        || cmd_eq(cmd, b"TTL")
+        || cmd_eq(cmd, b"PTTL")
+        || cmd_eq(cmd, b"TYPE")
+        || cmd_eq(cmd, b"PERSIST")
+        || cmd_eq(cmd, b"KEYS")
+        || cmd_eq(cmd, b"LLEN")
+        || cmd_eq(cmd, b"LPOP")
+        || cmd_eq(cmd, b"RPOP")
+        || cmd_eq(cmd, b"HGETALL")
+        || cmd_eq(cmd, b"HKEYS")
+        || cmd_eq(cmd, b"HVALS")
+        || cmd_eq(cmd, b"HLEN")
+        || cmd_eq(cmd, b"SMEMBERS")
+        || cmd_eq(cmd, b"SCARD")
+        || cmd_eq(cmd, b"ZCARD")
+        || cmd_eq(cmd, b"SCAN")
+        || cmd_eq(cmd, b"ECHO")
+        || cmd_eq(cmd, b"GETDEL")
         || cmd_eq(cmd, b"GETEX")
     {
         2
-    } else if cmd_eq(cmd, b"LPUSH") || cmd_eq(cmd, b"RPUSH") || cmd_eq(cmd, b"SADD")
-        || cmd_eq(cmd, b"SREM") || cmd_eq(cmd, b"INCRBY") || cmd_eq(cmd, b"DECRBY")
-        || cmd_eq(cmd, b"MSET") || cmd_eq(cmd, b"MGET") || cmd_eq(cmd, b"RENAME")
-        || cmd_eq(cmd, b"INCRBYFLOAT") || cmd_eq(cmd, b"HDEL") || cmd_eq(cmd, b"HMGET")
-        || cmd_eq(cmd, b"COPY") || cmd_eq(cmd, b"LRANGE") || cmd_eq(cmd, b"SUNION")
-        || cmd_eq(cmd, b"SINTER") || cmd_eq(cmd, b"SDIFF")
+    } else if cmd_eq(cmd, b"LPUSH")
+        || cmd_eq(cmd, b"RPUSH")
+        || cmd_eq(cmd, b"SADD")
+        || cmd_eq(cmd, b"SREM")
+        || cmd_eq(cmd, b"INCRBY")
+        || cmd_eq(cmd, b"DECRBY")
+        || cmd_eq(cmd, b"MSET")
+        || cmd_eq(cmd, b"MGET")
+        || cmd_eq(cmd, b"RENAME")
+        || cmd_eq(cmd, b"INCRBYFLOAT")
+        || cmd_eq(cmd, b"HDEL")
+        || cmd_eq(cmd, b"HMGET")
+        || cmd_eq(cmd, b"COPY")
+        || cmd_eq(cmd, b"LRANGE")
+        || cmd_eq(cmd, b"SUNION")
+        || cmd_eq(cmd, b"SINTER")
+        || cmd_eq(cmd, b"SDIFF")
     {
         3
-    } else if cmd_eq(cmd, b"SETEX") || cmd_eq(cmd, b"PSETEX") || cmd_eq(cmd, b"HSET")
-        || cmd_eq(cmd, b"HMSET") || cmd_eq(cmd, b"HINCRBY") || cmd_eq(cmd, b"HSETNX")
-        || cmd_eq(cmd, b"HINCRBYFLOAT") || cmd_eq(cmd, b"ZADD") || cmd_eq(cmd, b"LSET")
-        || cmd_eq(cmd, b"SETRANGE") || cmd_eq(cmd, b"LINSERT") || cmd_eq(cmd, b"LREM")
-        || cmd_eq(cmd, b"LTRIM") || cmd_eq(cmd, b"ZUNIONSTORE") || cmd_eq(cmd, b"ZINTERSTORE")
-        || cmd_eq(cmd, b"ZDIFFSTORE") || cmd_eq(cmd, b"ZSCORE") || cmd_eq(cmd, b"ZRANK")
-        || cmd_eq(cmd, b"ZREVRANK") || cmd_eq(cmd, b"ZREM") || cmd_eq(cmd, b"ZINCRBY")
-        || cmd_eq(cmd, b"SMOVE") || cmd_eq(cmd, b"HSTRLEN")
+    } else if cmd_eq(cmd, b"SETEX")
+        || cmd_eq(cmd, b"PSETEX")
+        || cmd_eq(cmd, b"HSET")
+        || cmd_eq(cmd, b"HMSET")
+        || cmd_eq(cmd, b"HINCRBY")
+        || cmd_eq(cmd, b"HSETNX")
+        || cmd_eq(cmd, b"HINCRBYFLOAT")
+        || cmd_eq(cmd, b"ZADD")
+        || cmd_eq(cmd, b"LSET")
+        || cmd_eq(cmd, b"SETRANGE")
+        || cmd_eq(cmd, b"LINSERT")
+        || cmd_eq(cmd, b"LREM")
+        || cmd_eq(cmd, b"LTRIM")
+        || cmd_eq(cmd, b"ZUNIONSTORE")
+        || cmd_eq(cmd, b"ZINTERSTORE")
+        || cmd_eq(cmd, b"ZDIFFSTORE")
+        || cmd_eq(cmd, b"ZSCORE")
+        || cmd_eq(cmd, b"ZRANK")
+        || cmd_eq(cmd, b"ZREVRANK")
+        || cmd_eq(cmd, b"ZREM")
+        || cmd_eq(cmd, b"ZINCRBY")
+        || cmd_eq(cmd, b"SMOVE")
+        || cmd_eq(cmd, b"HSTRLEN")
     {
         4
-    } else if cmd_eq(cmd, b"PING") || cmd_eq(cmd, b"DBSIZE") || cmd_eq(cmd, b"FLUSHDB")
-        || cmd_eq(cmd, b"FLUSHALL") || cmd_eq(cmd, b"SAVE") || cmd_eq(cmd, b"INFO")
-        || cmd_eq(cmd, b"TIME") || cmd_eq(cmd, b"RANDOMKEY") || cmd_eq(cmd, b"BGSAVE")
-        || cmd_eq(cmd, b"LASTSAVE") || cmd_eq(cmd, b"HELLO") || cmd_eq(cmd, b"QUIT")
-        || cmd_eq(cmd, b"COMMAND") || cmd_eq(cmd, b"CONFIG") || cmd_eq(cmd, b"CLIENT")
+    } else if cmd_eq(cmd, b"PING")
+        || cmd_eq(cmd, b"DBSIZE")
+        || cmd_eq(cmd, b"FLUSHDB")
+        || cmd_eq(cmd, b"FLUSHALL")
+        || cmd_eq(cmd, b"SAVE")
+        || cmd_eq(cmd, b"INFO")
+        || cmd_eq(cmd, b"TIME")
+        || cmd_eq(cmd, b"RANDOMKEY")
+        || cmd_eq(cmd, b"BGSAVE")
+        || cmd_eq(cmd, b"LASTSAVE")
+        || cmd_eq(cmd, b"HELLO")
+        || cmd_eq(cmd, b"QUIT")
+        || cmd_eq(cmd, b"COMMAND")
+        || cmd_eq(cmd, b"CONFIG")
+        || cmd_eq(cmd, b"CLIENT")
         || cmd_eq(cmd, b"SELECT")
     {
         1
@@ -2774,7 +2925,12 @@ mod tests {
         exec(&store, &[b"SET", b"k", b"hello"]);
         let out = exec_str(&store, &[b"MEMORY", b"USAGE", b"k"]);
         assert!(out.starts_with(":"), "should be integer: {out}");
-        let n: i64 = out.trim().trim_start_matches(':').trim_end_matches("\r\n").parse().unwrap_or(0);
+        let n: i64 = out
+            .trim()
+            .trim_start_matches(':')
+            .trim_end_matches("\r\n")
+            .parse()
+            .unwrap_or(0);
         assert!(n > 0, "should be positive: {n}");
     }
 
@@ -2858,7 +3014,10 @@ mod tests {
         let store = Store::new();
         exec(&store, &[b"SADD", b"s", b"a", b"b", b"c"]);
         let out = exec_str(&store, &[b"SSCAN", b"s", b"0"]);
-        assert!(out.starts_with("*2"), "two-element array (cursor + items): {out}");
+        assert!(
+            out.starts_with("*2"),
+            "two-element array (cursor + items): {out}"
+        );
     }
 
     #[test]
@@ -2912,7 +3071,10 @@ mod tests {
         let store = Store::new();
         exec(&store, &[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2"]);
         let out = exec_str(&store, &[b"HRANDFIELD", b"h"]);
-        assert!(out.contains("f1") || out.contains("f2"), "returns a field: {out}");
+        assert!(
+            out.contains("f1") || out.contains("f2"),
+            "returns a field: {out}"
+        );
     }
 
     #[test]
@@ -2946,7 +3108,12 @@ mod tests {
     #[test]
     fn zremrangebylex_basic() {
         let store = Store::new();
-        exec(&store, &[b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d"]);
+        exec(
+            &store,
+            &[
+                b"ZADD", b"z", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d",
+            ],
+        );
         let out = exec_str(&store, &[b"ZREMRANGEBYLEX", b"z", b"[a", b"[c"]);
         assert!(out.contains(":3"), "removed a,b,c: {out}");
         let out = exec_str(&store, &[b"ZCARD", b"z"]);
@@ -2978,7 +3145,10 @@ mod tests {
         let store = Store::new();
         exec(&store, &[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]);
         let out = exec_str(&store, &[b"ZREVRANGEBYSCORE", b"z", b"3", b"1"]);
-        assert!(out.contains("a") && out.contains("c"), "contains both: {out}");
+        assert!(
+            out.contains("a") && out.contains("c"),
+            "contains both: {out}"
+        );
     }
 
     #[test]

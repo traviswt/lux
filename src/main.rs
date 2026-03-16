@@ -230,8 +230,16 @@ async fn handle_connection(
 
                     if cmd_eq_fast(args[0], b"MULTI") {
                         if in_multi {
-                            let cmd_name = std::str::from_utf8(args[0]).unwrap_or("multi").to_lowercase();
-                            resp::write_error(&mut write_buf, &format!("ERR Command '{}' not allowed inside a transaction", cmd_name));
+                            let cmd_name = std::str::from_utf8(args[0])
+                                .unwrap_or("multi")
+                                .to_lowercase();
+                            resp::write_error(
+                                &mut write_buf,
+                                &format!(
+                                    "ERR Command '{}' not allowed inside a transaction",
+                                    cmd_name
+                                ),
+                            );
                             tx_error = true;
                         } else {
                             in_multi = true;
@@ -243,7 +251,10 @@ async fn handle_connection(
                         if !in_multi {
                             resp::write_error(&mut write_buf, "ERR EXEC without MULTI");
                         } else if tx_error {
-                            resp::write_error(&mut write_buf, "EXECABORT Transaction discarded because of previous errors.");
+                            resp::write_error(
+                                &mut write_buf,
+                                "EXECABORT Transaction discarded because of previous errors.",
+                            );
                         } else {
                             let mut aborted = false;
                             for (_key, shard_idx, version) in &watched {
@@ -259,10 +270,14 @@ async fn handle_connection(
                                 let queue = std::mem::take(&mut tx_queue);
                                 resp::write_array_header(&mut write_buf, queue.len());
                                 for owned_args in &queue {
-                                    let refs: Vec<&[u8]> = owned_args.iter().map(|v| v.as_slice()).collect();
-                                    match cmd::execute(&store, &broker, &refs, &mut write_buf, now) {
+                                    let refs: Vec<&[u8]> =
+                                        owned_args.iter().map(|v| v.as_slice()).collect();
+                                    match cmd::execute(&store, &broker, &refs, &mut write_buf, now)
+                                    {
                                         CmdResult::Written => {}
-                                        CmdResult::Authenticated => { authenticated = true; }
+                                        CmdResult::Authenticated => {
+                                            authenticated = true;
+                                        }
                                         CmdResult::Subscribe { .. } => {
                                             resp::write_error(&mut write_buf, "ERR Command 'subscribe' not allowed inside a transaction");
                                         }
@@ -292,10 +307,16 @@ async fn handle_connection(
                         continue;
                     } else if cmd_eq_fast(args[0], b"WATCH") {
                         if in_multi {
-                            resp::write_error(&mut write_buf, "ERR Command 'watch' not allowed inside a transaction");
+                            resp::write_error(
+                                &mut write_buf,
+                                "ERR Command 'watch' not allowed inside a transaction",
+                            );
                             tx_error = true;
                         } else if args.len() < 2 {
-                            resp::write_error(&mut write_buf, "ERR wrong number of arguments for 'watch' command");
+                            resp::write_error(
+                                &mut write_buf,
+                                "ERR wrong number of arguments for 'watch' command",
+                            );
                         } else {
                             for key_bytes in &args[1..] {
                                 let key = std::str::from_utf8(key_bytes).unwrap_or("").to_string();
@@ -313,20 +334,32 @@ async fn handle_connection(
                     }
 
                     if in_multi {
-                        if cmd_eq_fast(args[0], b"SUBSCRIBE") || cmd_eq_fast(args[0], b"PSUBSCRIBE") {
-                            resp::write_error(&mut write_buf, &format!(
-                                "ERR Command '{}' not allowed inside a transaction",
-                                std::str::from_utf8(args[0]).unwrap_or("subscribe").to_lowercase()
-                            ));
+                        if cmd_eq_fast(args[0], b"SUBSCRIBE") || cmd_eq_fast(args[0], b"PSUBSCRIBE")
+                        {
+                            resp::write_error(
+                                &mut write_buf,
+                                &format!(
+                                    "ERR Command '{}' not allowed inside a transaction",
+                                    std::str::from_utf8(args[0])
+                                        .unwrap_or("subscribe")
+                                        .to_lowercase()
+                                ),
+                            );
                             tx_error = true;
                         } else if !cmd::is_known_command(args[0]) {
-                            let cmd_name = std::str::from_utf8(args[0]).unwrap_or("unknown").to_lowercase();
-                            resp::write_error(&mut write_buf, &format!("ERR unknown command '{cmd_name}'"));
+                            let cmd_name = std::str::from_utf8(args[0])
+                                .unwrap_or("unknown")
+                                .to_lowercase();
+                            resp::write_error(
+                                &mut write_buf,
+                                &format!("ERR unknown command '{cmd_name}'"),
+                            );
                             tx_error = true;
                         } else {
                             match cmd::validate_args(args) {
                                 Ok(()) => {
-                                    let owned: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
+                                    let owned: Vec<Vec<u8>> =
+                                        args.iter().map(|a| a.to_vec()).collect();
                                     tx_queue.push(owned);
                                     resp::write_queued(&mut write_buf);
                                 }
@@ -422,8 +455,16 @@ async fn handle_connection(
 
                         if cmd_eq_fast(args[0], b"MULTI") {
                             if in_multi {
-                                let cmd_name = std::str::from_utf8(args[0]).unwrap_or("multi").to_lowercase();
-                                resp::write_error(&mut write_buf, &format!("ERR Command '{}' not allowed inside a transaction", cmd_name));
+                                let cmd_name = std::str::from_utf8(args[0])
+                                    .unwrap_or("multi")
+                                    .to_lowercase();
+                                resp::write_error(
+                                    &mut write_buf,
+                                    &format!(
+                                        "ERR Command '{}' not allowed inside a transaction",
+                                        cmd_name
+                                    ),
+                                );
                                 tx_error = true;
                             } else {
                                 in_multi = true;
@@ -435,7 +476,10 @@ async fn handle_connection(
                             if !in_multi {
                                 resp::write_error(&mut write_buf, "ERR EXEC without MULTI");
                             } else if tx_error {
-                                resp::write_error(&mut write_buf, "EXECABORT Transaction discarded because of previous errors.");
+                                resp::write_error(
+                                    &mut write_buf,
+                                    "EXECABORT Transaction discarded because of previous errors.",
+                                );
                             } else {
                                 let mut aborted = false;
                                 for (_, shard_idx, version) in &watched {
@@ -450,10 +494,19 @@ async fn handle_connection(
                                     let queue = std::mem::take(&mut tx_queue);
                                     resp::write_array_header(&mut write_buf, queue.len());
                                     for owned_args in &queue {
-                                        let refs: Vec<&[u8]> = owned_args.iter().map(|v| v.as_slice()).collect();
-                                        match cmd::execute(&store, &broker, &refs, &mut write_buf, now) {
+                                        let refs: Vec<&[u8]> =
+                                            owned_args.iter().map(|v| v.as_slice()).collect();
+                                        match cmd::execute(
+                                            &store,
+                                            &broker,
+                                            &refs,
+                                            &mut write_buf,
+                                            now,
+                                        ) {
                                             CmdResult::Written => {}
-                                            CmdResult::Authenticated => { authenticated = true; }
+                                            CmdResult::Authenticated => {
+                                                authenticated = true;
+                                            }
                                             CmdResult::Subscribe { .. } => {
                                                 resp::write_error(&mut write_buf, "ERR Command 'subscribe' not allowed inside a transaction");
                                             }
@@ -483,13 +536,20 @@ async fn handle_connection(
                             continue;
                         } else if cmd_eq_fast(args[0], b"WATCH") {
                             if in_multi {
-                                resp::write_error(&mut write_buf, "ERR Command 'watch' not allowed inside a transaction");
+                                resp::write_error(
+                                    &mut write_buf,
+                                    "ERR Command 'watch' not allowed inside a transaction",
+                                );
                                 tx_error = true;
                             } else if args.len() < 2 {
-                                resp::write_error(&mut write_buf, "ERR wrong number of arguments for 'watch' command");
+                                resp::write_error(
+                                    &mut write_buf,
+                                    "ERR wrong number of arguments for 'watch' command",
+                                );
                             } else {
                                 for key_bytes in &args[1..] {
-                                    let key = std::str::from_utf8(key_bytes).unwrap_or("").to_string();
+                                    let key =
+                                        std::str::from_utf8(key_bytes).unwrap_or("").to_string();
                                     let shard_idx = store.shard_for_key(key_bytes);
                                     let version = store.shard_version(shard_idx);
                                     watched.push((key, shard_idx, version));
@@ -504,16 +564,24 @@ async fn handle_connection(
                         }
 
                         if in_multi {
-                            if cmd_eq_fast(args[0], b"SUBSCRIBE") || cmd_eq_fast(args[0], b"PSUBSCRIBE") {
-                                resp::write_error(&mut write_buf, &format!(
-                                    "ERR Command '{}' not allowed inside a transaction",
-                                    std::str::from_utf8(args[0]).unwrap_or("subscribe").to_lowercase()
-                                ));
+                            if cmd_eq_fast(args[0], b"SUBSCRIBE")
+                                || cmd_eq_fast(args[0], b"PSUBSCRIBE")
+                            {
+                                resp::write_error(
+                                    &mut write_buf,
+                                    &format!(
+                                        "ERR Command '{}' not allowed inside a transaction",
+                                        std::str::from_utf8(args[0])
+                                            .unwrap_or("subscribe")
+                                            .to_lowercase()
+                                    ),
+                                );
                                 tx_error = true;
                             } else {
                                 match cmd::validate_args(args) {
                                     Ok(()) => {
-                                        let owned: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
+                                        let owned: Vec<Vec<u8>> =
+                                            args.iter().map(|a| a.to_vec()).collect();
                                         tx_queue.push(owned);
                                         resp::write_queued(&mut write_buf);
                                     }

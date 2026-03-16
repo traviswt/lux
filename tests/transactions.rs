@@ -61,8 +61,7 @@ impl Drop for LuxServer {
 
 fn start_lux(port: u16) -> LuxServer {
     let bin = find_lux_binary().expect("no lux binary found - run `cargo build` first");
-    let tmpdir =
-        std::env::temp_dir().join(format!("lux_tx_test_{}_{}", std::process::id(), port));
+    let tmpdir = std::env::temp_dir().join(format!("lux_tx_test_{}_{}", std::process::id(), port));
     std::fs::create_dir_all(&tmpdir).unwrap();
     let child = std::process::Command::new(&bin)
         .env("LUX_PORT", port.to_string())
@@ -200,7 +199,10 @@ fn subscribe_inside_multi_returns_error() {
         "SUBSCRIBE in MULTI should error: {resp}"
     );
     let resp = send_and_read(&mut conn, &["EXEC"]);
-    assert!(resp.contains("EXECABORT"), "EXEC after SUBSCRIBE error: {resp}");
+    assert!(
+        resp.contains("EXECABORT"),
+        "EXEC after SUBSCRIBE error: {resp}"
+    );
 }
 
 #[test]
@@ -246,7 +248,10 @@ fn exec_without_multi_returns_error() {
     let mut conn = connect(port);
 
     let resp = send_and_read(&mut conn, &["EXEC"]);
-    assert!(resp.contains("ERR EXEC without MULTI"), "EXEC error: {resp}");
+    assert!(
+        resp.contains("ERR EXEC without MULTI"),
+        "EXEC error: {resp}"
+    );
 }
 
 #[test]
@@ -309,7 +314,10 @@ fn bad_args_in_multi_not_queued() {
 
     send_and_read(&mut conn, &["SET", "ok_key", "ok_val"]);
     let resp = send_and_read(&mut conn, &["EXEC"]);
-    assert!(resp.contains("EXECABORT"), "EXEC should abort after bad args: {resp}");
+    assert!(
+        resp.contains("EXECABORT"),
+        "EXEC should abort after bad args: {resp}"
+    );
 }
 
 #[test]

@@ -3458,7 +3458,10 @@ mod tests {
             + 60000;
         assert!(store.pexpireat(b"k", future_ms, n));
         let pttl = store.pttl(b"k", n);
-        assert!(pttl > 50000 && pttl <= 60000, "PTTL should be ~60000: {pttl}");
+        assert!(
+            pttl > 50000 && pttl <= 60000,
+            "PTTL should be ~60000: {pttl}"
+        );
     }
 
     #[test]

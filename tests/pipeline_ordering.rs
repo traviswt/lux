@@ -244,7 +244,6 @@ fn pipeline_set_ordering_simple_path() {
     let s = samples.load(Ordering::Relaxed);
     let max = max_a_seen.load(Ordering::Relaxed);
 
-
     assert!(
         s >= 100,
         "readers only took {s} samples - test is not meaningful (need >= 100)"
@@ -338,7 +337,6 @@ fn pipeline_mixed_commands_ordering() {
     let v = violations.load(Ordering::Relaxed);
     let s = samples.load(Ordering::Relaxed);
     let max = max_x_seen.load(Ordering::Relaxed);
-
 
     assert!(
         s >= 100,
@@ -443,7 +441,6 @@ fn pipeline_high_contention_ordering() {
 
     let v = total_violations.load(Ordering::Relaxed);
     let s = total_samples.load(Ordering::Relaxed);
-
 
     assert!(
         s >= 100,

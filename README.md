@@ -25,7 +25,15 @@
 
 ## Why Lux?
 
-Redis is single-threaded by design. Every command runs on one core. Lux takes the opposite approach: a **sharded concurrent architecture** built in Rust that safely uses all your cores. Point your existing Redis client at Lux. Most workloads just work.
+Redis is single-threaded by design. Antirez made that choice in 2009 because it eliminates all locking, race conditions, and concurrency bugs. For most workloads, the bottleneck is network I/O, not CPU, so a single-threaded event loop is fast enough. It was a brilliant simplification.
+
+But it has a ceiling. Once you saturate one core, that's it. Redis can't use the other 15 cores on your machine. The official answer is to run multiple Redis instances and shard at the client level (Redis Cluster), which adds significant operational complexity.
+
+Lux takes the opposite approach: a **sharded concurrent architecture** that safely uses all your cores in a single process. Each key maps to one of N shards, each protected by a `parking_lot` RwLock. Reads never block reads. Writes only block the single shard they touch. Tokio's async runtime handles thousands of connections across all cores. The result: single-digit microsecond latency at low concurrency (matching Redis), and linear throughput scaling as you add cores and pipeline depth (where Redis flatlines).
+
+"Doesn't multi-threading introduce the bugs Redis avoided?" No. Lux's concurrency is at the shard level, not the command level. Each command acquires a single shard lock, does its work, and releases. There are no cross-shard locks, no lock ordering issues, no deadlocks. The only shared mutable state is inside shards, and the RwLock makes that safe. MULTI/EXEC transactions use WATCH-based optimistic concurrency (shard versioning) rather than global locks, matching what Redis clients actually rely on.
+
+Point your existing Redis client at Lux. Most workloads just work.
 
 **Works with every Redis client** -- ioredis, redis-py, go-redis, Jedis, redis-rb. Zero code changes.
 
@@ -54,7 +62,7 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **100+ Redis commands** -- strings, lists, hashes, sets, sorted sets, pub/sub
+- **140+ Redis commands** -- strings, lists, hashes, sets, sorted sets, pub/sub, transactions
 - **RESP2 protocol** -- compatible with every Redis client
 - **Multi-threaded** -- auto-tuned shards, parking_lot RwLocks, tokio async runtime
 - **Zero-copy parser** -- RESP arguments are byte slices into the read buffer
@@ -139,11 +147,25 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 113 tests covering the RESP parser, store operations, command dispatch, pub/sub, snapshot persistence, and pipeline ordering.
+Lux has 220 tests across unit and integration suites.
 
 ```bash
-cargo test
+cargo test -- --test-threads=1
 ```
+
+| Suite | Tests | What it covers |
+|-------|------:|----------------|
+| **Unit: cmd** | 62 | Every command handler, arg validation, error paths |
+| **Unit: store** | 66 | All data structures, TTL, shard versioning, expiry |
+| **Unit: resp** | 19 | RESP parser, serializers, edge cases |
+| **Unit: snapshot** | 7 | Roundtrip all data types, TTL preservation |
+| **Unit: pubsub** | 5 | Broker subscribe/publish/isolation |
+| **Integration: transactions** | 29 | MULTI/EXEC, WATCH/UNWATCH, EXECABORT, DISCARD |
+| **Integration: auth** | 6 | Password gating, per-connection state, error paths |
+| **Integration: pubsub** | 10 | Cross-connection message delivery, unsubscribe, sub mode |
+| **Integration: persistence** | 3 | Snapshot save/restart/restore, FLUSHDB+SAVE |
+| **Integration: pipelines** | 3 | Ordering under contention, fast-path batching |
+| **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
 
@@ -159,6 +181,8 @@ Every push and pull request runs:
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test --all-targets`
 - Integration tests against the Valkey test harness
+
+Release and Docker builds only proceed after tests pass.
 
 ## Supported Commands
 
@@ -176,6 +200,8 @@ Every push and pull request runs:
 
 **Pub/Sub:** `PUBLISH` `SUBSCRIBE` `UNSUBSCRIBE`
 
+**Transactions:** `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
+
 **Server:** `PING` `ECHO` `HELLO` `INFO` `TIME` `SAVE` `BGSAVE` `LASTSAVE` `AUTH` `CONFIG` `CLIENT` `SELECT` `COMMAND` `OBJECT` `MEMORY`
 
 ## Known Differences from Redis
@@ -183,11 +209,11 @@ Every push and pull request runs:
 Lux is Redis-compatible but not identical. Key differences:
 
 - **No Lua scripting** -- `EVAL`, `EVALSHA`, and `SCRIPT` are not supported
-- **No MULTI/EXEC transactions** -- commands are acknowledged but not transactional
 - **No blocking commands** -- `BLPOP`, `BRPOP`, `BLMOVE` etc. are not supported
 - **No AOF persistence** -- snapshots only (configurable interval)
 - **No RESP3 protocol** -- RESP2 only
 - **No cluster mode** -- single-node only (use Lux Cloud for managed hosting)
+- **MULTI/EXEC** -- supported with WATCH-based optimistic locking. Commands in a transaction execute sequentially, each acquiring its own shard lock, so another client could observe intermediate state mid-EXEC. Redis avoids this via single-threading. Standard client libraries (Redlock, BullMQ, Sidekiq) rely on WATCH for correctness, not EXEC isolation. Full shard-locking isolation may be added in a future release if there's demand
 - **Pipeline ordering** -- per-client command order is preserved. Consecutive same-shard commands are batched for performance
 
 ## Architecture

@@ -24,6 +24,11 @@ impl Hasher for FxHasher {
             self.0 = self.0.wrapping_mul(0x100000001b3);
         }
     }
+    fn write_usize(&mut self, _: usize) {}
+    fn write_u8(&mut self, _: u8) {}
+    fn write_u16(&mut self, _: u16) {}
+    fn write_u32(&mut self, _: u32) {}
+    fn write_u64(&mut self, _: u64) {}
     fn finish(&self) -> u64 {
         self.0
     }
@@ -39,10 +44,11 @@ pub fn num_shards() -> usize {
                 let cpus = std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4);
-                (cpus * 16).next_power_of_two().clamp(16, 1024)
+                (cpus * 16).next_power_of_two().max(16).min(1024)
             })
     })
 }
+pub const MAX_SHARDS: usize = 1024;
 
 pub enum StoreValue {
     Str(Bytes),
@@ -70,7 +76,7 @@ pub struct Entry {
 impl Entry {
     #[inline(always)]
     pub fn is_expired_at(&self, now: Instant) -> bool {
-        self.expires_at.is_some_and(|exp| now > exp)
+        self.expires_at.map_or(false, |exp| now > exp)
     }
 }
 
@@ -145,16 +151,18 @@ impl Store {
         key: &[u8],
         now: Instant,
     ) -> Option<Bytes> {
-        let ks = key_str(key);
-        data.get(ks).and_then(|entry| {
-            if entry.is_expired_at(now) {
-                return None;
-            }
-            match &entry.value {
-                StoreValue::Str(s) => Some(s.clone()),
-                _ => None,
-            }
-        })
+        let hash = fx_hash(key);
+        data.raw_entry()
+            .from_hash(hash, |k| k.as_bytes() == key)
+            .and_then(|(_, entry)| {
+                if entry.is_expired_at(now) {
+                    return None;
+                }
+                match &entry.value {
+                    StoreValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                }
+            })
     }
 
     #[inline(always)]
@@ -164,9 +172,9 @@ impl Store {
         now: Instant,
         out: &mut bytes::BytesMut,
     ) {
-        let ks = key_str(key);
-        match data.get(ks) {
-            Some(entry) if !entry.is_expired_at(now) => {
+        let hash = fx_hash(key);
+        match data.raw_entry().from_hash(hash, |k| k.as_bytes() == key) {
+            Some((_, entry)) if !entry.is_expired_at(now) => {
                 if let StoreValue::Str(s) = &entry.value {
                     crate::resp::write_bulk_raw(out, s);
                 } else {
@@ -185,19 +193,28 @@ impl Store {
         ttl: Option<Duration>,
         now: Instant,
     ) {
+        let hash = fx_hash(key);
         let expires_at = ttl.map(|d| now + d);
-        let ks = key_string(key);
-        if let Some(entry) = data.get_mut(&ks) {
-            entry.value = StoreValue::Str(Bytes::copy_from_slice(value));
-            entry.expires_at = expires_at;
-        } else {
-            data.insert(
-                ks,
-                Entry {
-                    value: StoreValue::Str(Bytes::copy_from_slice(value)),
-                    expires_at,
-                },
-            );
+        match data
+            .raw_entry_mut()
+            .from_hash(hash, |k| k.as_bytes() == key)
+        {
+            hashbrown::hash_map::RawEntryMut::Occupied(mut e) => {
+                let entry = e.get_mut();
+                entry.value = StoreValue::Str(Bytes::copy_from_slice(value));
+                entry.expires_at = expires_at;
+            }
+            hashbrown::hash_map::RawEntryMut::Vacant(e) => {
+                e.insert_with_hasher(
+                    hash,
+                    key_string(key),
+                    Entry {
+                        value: StoreValue::Str(Bytes::copy_from_slice(value)),
+                        expires_at,
+                    },
+                    |k| fx_hash(k.as_bytes()),
+                );
+            }
         }
     }
 
@@ -326,7 +343,9 @@ impl Store {
             },
             _ => (0, None),
         };
-        let new_val = current + delta;
+        let new_val = current
+            .checked_add(delta)
+            .ok_or_else(|| "ERR increment or decrement would overflow".to_string())?;
         shard.data.insert(
             key_string(key),
             Entry {
@@ -372,7 +391,7 @@ impl Store {
         for shard in self.shards.iter() {
             let shard = shard.read();
             for (k, e) in shard.data.iter() {
-                if e.expires_at.is_none_or(|exp| now < exp) && matcher.matches(k) {
+                if e.expires_at.map_or(true, |exp| now < exp) && matcher.matches(k) {
                     result.push(k.clone());
                 }
             }
@@ -488,7 +507,7 @@ impl Store {
             total += shard
                 .data
                 .values()
-                .filter(|e| e.expires_at.is_none_or(|exp| now < exp))
+                .filter(|e| e.expires_at.map_or(true, |exp| now < exp))
                 .count() as i64;
         }
         total
@@ -1698,7 +1717,7 @@ impl Store {
                 .data
                 .keys()
                 .enumerate()
-                .filter(|(j, _)| (*j + seed + i).is_multiple_of(5))
+                .filter(|(j, _)| (*j + seed + i) % 5 == 0)
                 .take(20)
                 .map(|(_, k)| k.clone())
                 .collect();

@@ -15,7 +15,7 @@ pub enum CmdResult {
 }
 
 fn is_restricted() -> bool {
-    std::env::var("LUX_RESTRICTED").is_ok_and(|v| v == "1" || v == "true")
+    std::env::var("LUX_RESTRICTED").map_or(false, |v| v == "1" || v == "true")
 }
 
 #[inline(always)]
@@ -175,9 +175,17 @@ pub fn execute(
             resp::write_error(out, "ERR wrong number of arguments for 'setex' command");
             return CmdResult::Written;
         }
-        match parse_u64(args[2]) {
+        match parse_i64(args[2]) {
+            Ok(secs) if secs <= 0 => {
+                resp::write_error(out, "ERR invalid expire time in 'setex' command")
+            }
             Ok(secs) => {
-                store.set(args[1], args[3], Some(Duration::from_secs(secs)), now);
+                store.set(
+                    args[1],
+                    args[3],
+                    Some(Duration::from_secs(secs as u64)),
+                    now,
+                );
                 resp::write_ok(out);
             }
             Err(_) => resp::write_error(out, "ERR value is not an integer or out of range"),
@@ -216,7 +224,7 @@ pub fn execute(
             resp::write_optional_bulk_raw(out, &store.get(key, now));
         }
     } else if cmd_eq(cmd, b"MSET") {
-        if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
             resp::write_error(out, "ERR wrong number of arguments for 'mset' command");
             return CmdResult::Written;
         }
@@ -309,27 +317,35 @@ pub fn execute(
         let cursor = parse_u64(args[1]).unwrap_or(0) as usize;
         let mut pattern: &[u8] = b"*";
         let mut count = 10usize;
+        let mut type_filter: Option<&str> = None;
         let mut i = 2;
         while i < args.len() {
-            if cmd_eq(args[i], b"MATCH") {
-                if i + 1 < args.len() {
-                    pattern = args[i + 1];
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            } else if cmd_eq(args[i], b"COUNT") {
-                if i + 1 < args.len() {
-                    count = parse_u64(args[i + 1]).unwrap_or(10) as usize;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+            if cmd_eq(args[i], b"MATCH") && i + 1 < args.len() {
+                pattern = args[i + 1];
+                i += 2;
+            } else if cmd_eq(args[i], b"COUNT") && i + 1 < args.len() {
+                count = parse_u64(args[i + 1]).unwrap_or(10) as usize;
+                i += 2;
+            } else if cmd_eq(args[i], b"TYPE") && i + 1 < args.len() {
+                type_filter = Some(arg_str(args[i + 1]));
+                i += 2;
             } else {
                 i += 1;
             }
         }
-        let (next_cursor, keys) = store.scan(cursor, pattern, count, now);
+        let (next_cursor, all_keys) = store.scan(cursor, pattern, count, now);
+        let keys: Vec<String> = if let Some(tf) = type_filter {
+            all_keys
+                .into_iter()
+                .filter(|k| {
+                    store
+                        .get_entry_type(k.as_bytes(), now)
+                        .map_or(false, |t| t == tf)
+                })
+                .collect()
+        } else {
+            all_keys
+        };
         resp::write_array_header(out, 2);
         resp::write_bulk(out, &next_cursor.to_string());
         resp::write_bulk_array(out, &keys);
@@ -439,11 +455,12 @@ pub fn execute(
             match shard.data.get_mut(ks) {
                 Some(entry) if !entry.is_expired_at(now) => {
                     if let StoreValue::List(list) = &mut entry.value {
-                        let n = count.min(list.len());
-                        let items: Vec<Bytes> = (0..n).filter_map(|_| list.pop_front()).collect();
-                        if items.is_empty() {
-                            resp::write_null(out);
+                        if count == 0 {
+                            resp::write_array_header(out, 0);
                         } else {
+                            let n = count.min(list.len());
+                            let items: Vec<Bytes> =
+                                (0..n).filter_map(|_| list.pop_front()).collect();
                             resp::write_array_header(out, items.len());
                             for item in &items {
                                 resp::write_bulk_raw(out, item);
@@ -471,11 +488,12 @@ pub fn execute(
             match shard.data.get_mut(ks) {
                 Some(entry) if !entry.is_expired_at(now) => {
                     if let StoreValue::List(list) = &mut entry.value {
-                        let n = count.min(list.len());
-                        let items: Vec<Bytes> = (0..n).filter_map(|_| list.pop_back()).collect();
-                        if items.is_empty() {
-                            resp::write_null(out);
+                        if count == 0 {
+                            resp::write_array_header(out, 0);
                         } else {
+                            let n = count.min(list.len());
+                            let items: Vec<Bytes> =
+                                (0..n).filter_map(|_| list.pop_back()).collect();
                             resp::write_array_header(out, items.len());
                             for item in &items {
                                 resp::write_bulk_raw(out, item);
@@ -518,7 +536,7 @@ pub fn execute(
         let index = parse_i64(args[2]).unwrap_or(0);
         resp::write_optional_bulk_raw(out, &store.lindex(args[1], index, now));
     } else if cmd_eq(cmd, b"HSET") || cmd_eq(cmd, b"HMSET") {
-        if args.len() < 4 || !(args.len() - 2).is_multiple_of(2) {
+        if args.len() < 4 || (args.len() - 2) % 2 != 0 {
             let cmd_name = if cmd_eq(cmd, b"HMSET") {
                 "hmset"
             } else {
@@ -727,7 +745,9 @@ pub fn execute(
         } else {
             resp::write_ok(out);
         }
-    } else if cmd_eq(cmd, b"CLIENT") || cmd_eq(cmd, b"SELECT") {
+    } else if cmd_eq(cmd, b"CLIENT") {
+        resp::write_ok(out);
+    } else if cmd_eq(cmd, b"SELECT") {
         resp::write_ok(out);
     } else if cmd_eq(cmd, b"COMMAND") {
         if args.len() > 1 && cmd_eq(args[1], b"DOCS") {
@@ -812,7 +832,7 @@ pub fn execute(
             ),
         );
     } else if cmd_eq(cmd, b"MSETNX") {
-        if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
             resp::write_error(out, "ERR wrong number of arguments for 'msetnx' command");
             return CmdResult::Written;
         }
@@ -823,7 +843,7 @@ pub fn execute(
             resp::write_error(out, "ERR wrong number of arguments for 'unlink' command");
             return CmdResult::Written;
         }
-        resp::write_integer(out, store.unlink(&args[1..]));
+        resp::write_integer(out, store.unlink(&args[1..].to_vec()));
     } else if cmd_eq(cmd, b"EXPIREAT") {
         if args.len() < 3 {
             resp::write_error(out, "ERR wrong number of arguments for 'expireat' command");
@@ -914,13 +934,13 @@ pub fn execute(
             resp::write_error(out, "ERR wrong number of arguments for 'lpushx' command");
             return CmdResult::Written;
         }
-        resp::write_integer(out, store.lpushx(args[1], &args[2..], now));
+        resp::write_integer(out, store.lpushx(args[1], &args[2..].to_vec(), now));
     } else if cmd_eq(cmd, b"RPUSHX") {
         if args.len() < 3 {
             resp::write_error(out, "ERR wrong number of arguments for 'rpushx' command");
             return CmdResult::Written;
         }
-        resp::write_integer(out, store.rpushx(args[1], &args[2..], now));
+        resp::write_integer(out, store.rpushx(args[1], &args[2..].to_vec(), now));
     } else if cmd_eq(cmd, b"LPOS") {
         if args.len() < 3 {
             resp::write_error(out, "ERR wrong number of arguments for 'lpos' command");
@@ -935,9 +955,14 @@ pub fn execute(
         while i < args.len() {
             if cmd_eq(args[i], b"RANK") && i + 1 < args.len() {
                 rank = parse_i64(args[i + 1]).unwrap_or(1);
+                if rank == 0 {
+                    resp::write_error(out, "ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list");
+                    return CmdResult::Written;
+                }
                 i += 2;
             } else if cmd_eq(args[i], b"COUNT") && i + 1 < args.len() {
-                count = Some(parse_u64(args[i + 1]).unwrap_or(0) as usize);
+                let c = parse_u64(args[i + 1]).unwrap_or(0) as usize;
+                count = Some(c);
                 i += 2;
             } else if cmd_eq(args[i], b"MAXLEN") && i + 1 < args.len() {
                 maxlen = parse_u64(args[i + 1]).unwrap_or(0) as usize;
@@ -966,7 +991,7 @@ pub fn execute(
                                 if found >= rank {
                                     matches.push(j as i64);
                                     if let Some(c) = count {
-                                        if matches.len() >= c {
+                                        if c > 0 && matches.len() >= c {
                                             break;
                                         }
                                     } else {
@@ -983,7 +1008,7 @@ pub fn execute(
                                 if found >= rank.abs() {
                                     matches.push(j as i64);
                                     if let Some(c) = count {
-                                        if matches.len() >= c {
+                                        if c > 0 && matches.len() >= c {
                                             break;
                                         }
                                     } else {
@@ -1144,7 +1169,7 @@ pub fn execute(
             );
             return CmdResult::Written;
         }
-        let results = store.smismember(args[1], &args[2..], now);
+        let results = store.smismember(args[1], &args[2..].to_vec(), now);
         resp::write_array_header(out, results.len());
         for r in results {
             resp::write_integer(out, if r { 1 } else { 0 });
@@ -1157,7 +1182,7 @@ pub fn execute(
             );
             return CmdResult::Written;
         }
-        match store.sdiffstore(args[1], &args[2..], now) {
+        match store.sdiffstore(args[1], &args[2..].to_vec(), now) {
             Ok(n) => resp::write_integer(out, n),
             Err(e) => resp::write_error(out, &e),
         }
@@ -1169,7 +1194,7 @@ pub fn execute(
             );
             return CmdResult::Written;
         }
-        match store.sinterstore(args[1], &args[2..], now) {
+        match store.sinterstore(args[1], &args[2..].to_vec(), now) {
             Ok(n) => resp::write_integer(out, n),
             Err(e) => resp::write_error(out, &e),
         }
@@ -1181,7 +1206,7 @@ pub fn execute(
             );
             return CmdResult::Written;
         }
-        match store.sunionstore(args[1], &args[2..], now) {
+        match store.sunionstore(args[1], &args[2..].to_vec(), now) {
             Ok(n) => resp::write_integer(out, n),
             Err(e) => resp::write_error(out, &e),
         }
@@ -1198,7 +1223,7 @@ pub fn execute(
             resp::write_error(out, "ERR syntax error");
             return CmdResult::Written;
         }
-        match store.sinter(&args[2..2 + numkeys], now) {
+        match store.sinter(&args[2..2 + numkeys].to_vec(), now) {
             Ok(r) => resp::write_integer(out, r.len() as i64),
             Err(e) => resp::write_error(out, &e),
         }
@@ -1227,7 +1252,15 @@ pub fn execute(
                     } else {
                         count.unsigned_abs() as usize
                     };
-                    let fields: Vec<_> = map.iter().take(abs).collect();
+                    let all: Vec<_> = map.iter().collect();
+                    let seed = now.elapsed().as_nanos() as usize;
+                    let start = if all.is_empty() { 0 } else { seed % all.len() };
+                    let fields: Vec<_> = all
+                        .iter()
+                        .cycle()
+                        .skip(start)
+                        .take(abs.min(all.len()))
+                        .collect();
                     if args.len() <= 2 {
                         if fields.is_empty() {
                             resp::write_null(out);
@@ -1295,19 +1328,21 @@ pub fn execute(
                     } else {
                         resp::write_error(out, "WRONGTYPE");
                     }
-                } else if let StoreValue::Set(set) = &entry.value {
-                    let all: Vec<_> = set.iter().collect();
-                    let s = cursor.min(all.len());
-                    let e = (s + count).min(all.len());
-                    let next = if e >= all.len() { 0 } else { e };
-                    resp::write_array_header(out, 2);
-                    resp::write_bulk(out, &next.to_string());
-                    resp::write_array_header(out, e - s);
-                    for m in &all[s..e] {
-                        resp::write_bulk(out, m);
-                    }
                 } else {
-                    resp::write_error(out, "WRONGTYPE");
+                    if let StoreValue::Set(set) = &entry.value {
+                        let all: Vec<_> = set.iter().collect();
+                        let s = cursor.min(all.len());
+                        let e = (s + count).min(all.len());
+                        let next = if e >= all.len() { 0 } else { e };
+                        resp::write_array_header(out, 2);
+                        resp::write_bulk(out, &next.to_string());
+                        resp::write_array_header(out, e - s);
+                        for m in &all[s..e] {
+                            resp::write_bulk(out, m);
+                        }
+                    } else {
+                        resp::write_error(out, "WRONGTYPE");
+                    }
                 }
             }
             _ => {
@@ -1392,6 +1427,41 @@ pub fn execute(
             },
         );
         resp::write_bulk(out, &new_str);
+    } else if cmd_eq(cmd, b"TIME") {
+        let now_sys = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        resp::write_array_header(out, 2);
+        resp::write_bulk(out, &now_sys.as_secs().to_string());
+        resp::write_bulk(out, &(now_sys.subsec_micros()).to_string());
+    } else if cmd_eq(cmd, b"RENAMENX") {
+        if args.len() < 3 {
+            resp::write_error(out, "ERR wrong number of arguments for 'renamenx' command");
+            return CmdResult::Written;
+        }
+        if store.get(args[2], now).is_some() {
+            resp::write_integer(out, 0);
+        } else {
+            match store.rename(args[1], args[2], now) {
+                Ok(()) => resp::write_integer(out, 1),
+                Err(e) => resp::write_error(out, &e),
+            }
+        }
+    } else if cmd_eq(cmd, b"RANDOMKEY") {
+        let mut found = None;
+        for i in 0..store.shard_count() {
+            let shard = store.lock_read_shard(i);
+            if let Some((k, entry)) = shard.data.iter().next() {
+                if !entry.is_expired_at(now) {
+                    found = Some(k.clone());
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(k) => resp::write_bulk(out, &k),
+            None => resp::write_null(out),
+        }
     } else if cmd_eq(cmd, b"HELLO") {
         resp::write_array_header(out, 14);
         resp::write_bulk(out, "server");
@@ -1408,6 +1478,25 @@ pub fn execute(
         resp::write_bulk(out, "master");
         resp::write_bulk(out, "modules");
         resp::write_array_header(out, 0);
+    } else if cmd_eq(cmd, b"PSUBSCRIBE") || cmd_eq(cmd, b"PUNSUBSCRIBE") {
+        resp::write_ok(out);
+    } else if cmd_eq(cmd, b"COPY") {
+        if args.len() < 3 {
+            resp::write_error(out, "ERR wrong number of arguments for 'copy' command");
+            return CmdResult::Written;
+        }
+        let replace = args.iter().any(|a| cmd_eq(a, b"REPLACE"));
+        if !replace && store.get(args[2], now).is_some() {
+            resp::write_integer(out, 0);
+        } else {
+            match store.get(args[1], now) {
+                Some(val) => {
+                    store.set(args[2], &val, None, now);
+                    resp::write_integer(out, 1);
+                }
+                None => resp::write_integer(out, 0),
+            }
+        }
     } else if cmd_eq(cmd, b"FUNCTION")
         || cmd_eq(cmd, b"DEBUG")
         || cmd_eq(cmd, b"WAIT")
@@ -1453,7 +1542,9 @@ pub fn execute(
                             }
                         }
                         StoreValue::Hash(h) => {
-                            if h.len() < 128 {
+                            if h.len() < 128
+                                && h.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64)
+                            {
                                 "listpack"
                             } else {
                                 "hashtable"

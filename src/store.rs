@@ -106,6 +106,7 @@ pub fn num_shards() -> usize {
 }
 #[allow(dead_code)]
 pub const MAX_SHARDS: usize = 1024;
+const WRONGTYPE: &str = "WRONGTYPE Operation against a key holding the wrong kind of value";
 
 pub enum StoreValue {
     Str(Bytes),
@@ -409,12 +410,7 @@ impl Store {
                         .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
                     (n, e.expires_at)
                 }
-                _ => {
-                    return Err(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value"
-                            .to_string(),
-                    )
-                }
+                _ => return Err(WRONGTYPE.to_string()),
             },
             _ => (0, None),
         };
@@ -622,9 +618,7 @@ impl Store {
                 }
                 Ok(list.len() as i64)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -648,9 +642,7 @@ impl Store {
                 }
                 Ok(list.len() as i64)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -686,9 +678,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::List(list) => Ok(list.len() as i64),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -723,9 +713,7 @@ impl Store {
                         Ok(list.iter().skip(s).take(e - s).cloned().collect())
                     }
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -776,9 +764,7 @@ impl Store {
                 }
                 Ok(added)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -824,9 +810,7 @@ impl Store {
                     }
                     Ok(removed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -840,9 +824,7 @@ impl Store {
                 StoreValue::Hash(map) => {
                     Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -854,9 +836,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Hash(map) => Ok(map.keys().cloned().collect()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -868,9 +848,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Hash(map) => Ok(map.values().cloned().collect()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -882,9 +860,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Hash(map) => Ok(map.len() as i64),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -896,9 +872,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Hash(map) => Ok(map.contains_key(key_str(field))),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(false),
         }
@@ -940,9 +914,7 @@ impl Store {
                 map.insert(fs.to_string(), Bytes::from(new_val.to_string()));
                 Ok(new_val)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -969,9 +941,7 @@ impl Store {
                 }
                 Ok(added)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -990,9 +960,7 @@ impl Store {
                     }
                     Ok(removed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1004,9 +972,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Set(set) => Ok(set.iter().cloned().collect()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -1018,9 +984,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Set(set) => Ok(set.contains(key_str(member))),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(false),
         }
@@ -1032,9 +996,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Set(set) => Ok(set.len() as i64),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1046,9 +1008,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Set(set) => Ok(set.clone()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(HashSet::new()),
         }
@@ -1175,9 +1135,7 @@ impl Store {
 
                 Ok(id)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -1187,9 +1145,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::Stream(s) => Ok(s.entries.len() as i64),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1220,9 +1176,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -1253,9 +1207,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -1350,7 +1302,7 @@ impl Store {
                     );
                     Ok(())
                 }
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string()),
         }
@@ -1363,9 +1315,7 @@ impl Store {
         match shard.data.get_mut(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &mut entry.value {
                 StoreValue::Stream(s) => Ok(s.groups.remove(group).is_some()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(false),
         }
@@ -1499,9 +1449,7 @@ impl Store {
                     }
                     Ok(acked)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1540,9 +1488,7 @@ impl Store {
                     let consumers: Vec<(String, i64)> = consumer_counts.into_iter().collect();
                     Ok((count, min_id, max_id, consumers))
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
@@ -1594,9 +1540,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
@@ -1662,9 +1606,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -1745,9 +1687,7 @@ impl Store {
                     }
                     Ok((next_start, claimed, deleted_ids))
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err(format!(
                 "NOGROUP No such consumer group '{}' for key name '{}'",
@@ -1772,9 +1712,7 @@ impl Store {
                     }
                     Ok(removed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1794,9 +1732,7 @@ impl Store {
                     }
                     Ok(trimmed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -1820,9 +1756,7 @@ impl Store {
                     }
                     Ok(info)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err("ERR no such key".to_string()),
         }
@@ -1853,9 +1787,7 @@ impl Store {
                     }
                     Ok(groups_info)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err("ERR no such key".to_string()),
         }
@@ -2200,9 +2132,7 @@ impl Store {
                     list[i] = Bytes::copy_from_slice(value);
                     Ok(())
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Err("ERR no such key".to_string()),
         }
@@ -2230,9 +2160,7 @@ impl Store {
                         Ok(-1)
                     }
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -2277,9 +2205,7 @@ impl Store {
                     }
                     Ok(removed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -2311,9 +2237,7 @@ impl Store {
                     }
                     Ok(())
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(()),
         }
@@ -2434,9 +2358,7 @@ impl Store {
                     Ok(true)
                 }
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -2477,9 +2399,7 @@ impl Store {
                 map.insert(fs.to_string(), Bytes::from(s.clone()));
                 Ok(s)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -2515,9 +2435,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -2541,9 +2459,7 @@ impl Store {
                         .collect();
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -2563,12 +2479,7 @@ impl Store {
             match shard.data.get_mut(key_str(src)) {
                 Some(entry) if !entry.is_expired_at(now) => match &mut entry.value {
                     StoreValue::Set(set) => set.remove(key_str(member)),
-                    _ => {
-                        return Err(
-                            "WRONGTYPE Operation against a key holding the wrong kind of value"
-                                .to_string(),
-                        )
-                    }
+                    _ => return Err(WRONGTYPE.to_string()),
                 },
                 _ => false,
             }
@@ -2593,9 +2504,7 @@ impl Store {
                 set.insert(key_string(member));
                 Ok(true)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -2702,9 +2611,7 @@ impl Store {
                 }
                 Ok(if ch { added + changed } else { added })
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -2714,9 +2621,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::SortedSet(_, scores) => Ok(scores.get(key_str(member)).copied()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(None),
         }
@@ -2748,9 +2653,7 @@ impl Store {
                         None => Ok(None),
                     }
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(None),
         }
@@ -2773,9 +2676,7 @@ impl Store {
                     }
                     Ok(removed)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -2787,9 +2688,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::SortedSet(_, scores) => Ok(scores.len() as i64),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -2839,9 +2738,7 @@ impl Store {
                     };
                     Ok(items)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -2896,9 +2793,7 @@ impl Store {
                     let cnt = count.unwrap_or(filtered.len());
                     Ok(filtered.into_iter().skip(off).take(cnt).collect())
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -2935,9 +2830,7 @@ impl Store {
                 scores.insert(ms, new_score);
                 Ok(new_score)
             }
-            _ => {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
-            }
+            _ => Err(WRONGTYPE.to_string()),
         }
     }
 
@@ -2971,9 +2864,7 @@ impl Store {
                         .count();
                     Ok(count as i64)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(0),
         }
@@ -3002,9 +2893,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -3033,9 +2922,7 @@ impl Store {
                     }
                     Ok(result)
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -3047,9 +2934,7 @@ impl Store {
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => match &entry.value {
                 StoreValue::SortedSet(_, scores) => Ok(scores.clone()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(HashMap::new()),
         }
@@ -3239,9 +3124,7 @@ impl Store {
                     let cnt = count.unwrap_or(filtered.len());
                     Ok(filtered.into_iter().skip(off).take(cnt).collect())
                 }
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(vec![]),
         }
@@ -3261,9 +3144,7 @@ impl Store {
                     .iter()
                     .map(|m| scores.get(key_str(m)).copied())
                     .collect()),
-                _ => Err(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-                ),
+                _ => Err(WRONGTYPE.to_string()),
             },
             _ => Ok(members.iter().map(|_| None).collect()),
         }

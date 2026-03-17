@@ -1922,33 +1922,25 @@ impl Store {
                 entries.push(DumpEntry {
                     key: key.clone(),
                     value: match &entry.value {
-                        StoreValue::Str(s) => {
-                            DumpValue::Str(String::from_utf8_lossy(s).into_owned())
+                        StoreValue::Str(s) => DumpValue::Str(s.to_vec()),
+                        StoreValue::List(l) => {
+                            DumpValue::List(l.iter().map(|b| b.to_vec()).collect())
                         }
-                        StoreValue::List(l) => DumpValue::List(
-                            l.iter()
-                                .map(|b| String::from_utf8_lossy(b).into_owned())
-                                .collect(),
-                        ),
                         StoreValue::Hash(h) => DumpValue::Hash(
-                            h.iter()
-                                .map(|(k, v)| (k.clone(), String::from_utf8_lossy(v).into_owned()))
-                                .collect(),
+                            h.iter().map(|(k, v)| (k.clone(), v.to_vec())).collect(),
                         ),
                         StoreValue::Set(s) => DumpValue::Set(s.iter().cloned().collect()),
                         StoreValue::SortedSet(_, scores) => DumpValue::SortedSet(
                             scores.iter().map(|(m, s)| (m.clone(), *s)).collect(),
                         ),
                         StoreValue::Stream(s) => {
-                            let entries: Vec<(String, Vec<(String, String)>)> = s
+                            let entries: Vec<StreamDumpEntry> = s
                                 .entries
                                 .iter()
                                 .map(|(id, fields)| {
-                                    let flds: Vec<(String, String)> = fields
+                                    let flds: Vec<(String, Vec<u8>)> = fields
                                         .iter()
-                                        .map(|(k, v)| {
-                                            (k.clone(), String::from_utf8_lossy(v).into_owned())
-                                        })
+                                        .map(|(k, v)| (k.clone(), v.to_vec()))
                                         .collect();
                                     (id.to_string(), flds)
                                 })
@@ -3318,13 +3310,15 @@ impl Store {
     }
 }
 
+pub type StreamDumpEntry = (String, Vec<(String, Vec<u8>)>);
+
 pub enum DumpValue {
-    Str(String),
-    List(Vec<String>),
-    Hash(Vec<(String, String)>),
+    Str(Vec<u8>),
+    List(Vec<Vec<u8>>),
+    Hash(Vec<(String, Vec<u8>)>),
     Set(Vec<String>),
     SortedSet(Vec<(String, f64)>),
-    Stream(Vec<(String, Vec<(String, String)>)>, String),
+    Stream(Vec<StreamDumpEntry>, String),
 }
 
 pub struct DumpEntry {

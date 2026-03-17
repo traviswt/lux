@@ -5,8 +5,8 @@
 <h1 align="center">Lux</h1>
 
 <p align="center">
-  <strong>A Redis-compatible key-value store. 3-5x faster.</strong><br/>
-  Multi-threaded. Written in Rust. MIT licensed forever.
+  <strong>A Redis-compatible key-value store. 2-7x faster.</strong><br/>
+  Multi-threaded. BullMQ-compatible. Written in Rust. MIT licensed forever.
 </p>
 
 <p align="center">
@@ -35,24 +35,30 @@ Lux takes the opposite approach: a **sharded concurrent architecture** that safe
 
 Point your existing Redis client at Lux. Most workloads just work.
 
-**Works with every Redis client** -- ioredis, redis-py, go-redis, Jedis, redis-rb. Zero code changes.
+**Works with every Redis client** -- ioredis, redis-py, go-redis, Jedis, redis-rb, BullMQ. Zero code changes.
 
 ### Benchmarks
 
-`redis-benchmark`, 50 clients, 1M SET requests per pipeline depth. Sequential runs (one server at a time) on a 32-core Intel i9-14900K, 128GB RAM, Ubuntu 24.04.
+`redis-benchmark`, 50 clients, 1M requests, pipeline=64. Sequential runs (one server at a time) on a 32-core Intel i9-14900K, 128GB RAM, Ubuntu 24.04.
 
-| Pipeline | Lux | Redis 8.6.1 | Lux/Redis |
-|----------|-----|-------------|-----------|
-| 1 | 287K | 296K | 0.97x |
-| 16 | 3.89M | 2.47M | **1.58x** |
-| 64 | **10.87M** | 3.30M | **3.29x** |
-| 128 | **15.39M** | 3.52M | **4.37x** |
-| 256 | **20.00M** | 3.58M | **5.58x** |
-| 512 | **20.01M** | 3.50M | **5.72x** |
+| Command | Lux | Redis 8.6.1 | Lux/Redis |
+|---------|-----|-------------|-----------|
+| SET | 11.2M | 3.3M | **3.4x** |
+| GET | 12.0M | 4.7M | **2.6x** |
+| INCR | 6.3M | 4.0M | **1.6x** |
+| LPUSH | 6.5M | 3.3M | **2.0x** |
+| RPUSH | 6.4M | 3.7M | **1.7x** |
+| LPOP | 11.6M | 3.0M | **3.9x** |
+| RPOP | 11.1M | 3.3M | **3.4x** |
+| SADD | 7.2M | 4.1M | **1.8x** |
+| HSET | 6.8M | 3.3M | **2.0x** |
+| SPOP | 12.2M | 4.5M | **2.7x** |
+| ZADD | 7.0M | 3.1M | **2.3x** |
+| ZPOPMIN | 11.5M | 5.3M | **2.2x** |
 
-At pipeline depth 256, Lux hits **20 million SET ops/sec** -- 5.6x faster than Redis 8. At low concurrency they're equal. The gap grows with pipeline depth and core count because Lux's shard batching scales across all cores while Redis is bound to one.
+Lux beats Redis on every single-key command. At pipeline=1, both are network-bound and roughly equal. The gap grows with pipeline depth because Lux batches same-shard commands under a single lock while Redis processes sequentially on one core.
 
-Reproduce with `./bench.sh` (requires `redis-server` and `redis-benchmark` in PATH).
+Full results including SET scaling by pipeline depth (up to **6.85x** at pipeline=512) in [BENCHMARKS.md](BENCHMARKS.md). Reproduce with `./bench.sh`.
 
 ## Lux Cloud
 
@@ -65,16 +71,19 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **140+ Redis commands** -- strings, lists, hashes, sets, sorted sets, pub/sub, transactions
+- **160+ Redis commands** -- strings, lists, hashes, sets, sorted sets, streams, pub/sub, transactions
+- **BullMQ compatible** -- blocking commands, streams, Lua scripting with cmsgpack/cjson
+- **Lua scripting** -- EVAL, EVALSHA, SCRIPT with redis.call/pcall, cmsgpack, and cjson
+- **Redis Streams** -- XADD, XREAD, XREADGROUP, XACK, consumer groups, blocking reads
+- **Blocking commands** -- BLPOP, BRPOP, BLMOVE, BZPOPMIN, BZPOPMAX
 - **RESP2 protocol** -- compatible with every Redis client
 - **Multi-threaded** -- auto-tuned shards, parking_lot RwLocks, tokio async runtime
 - **Zero-copy parser** -- RESP arguments are byte slices into the read buffer
-- **Pipeline batching** -- consecutive same-shard commands batched, preserving per-client ordering
+- **Pipeline batching** -- consecutive same-shard commands batched under a single lock
 - **Persistence** -- automatic snapshots, configurable interval
 - **Auth** -- password authentication via `LUX_PASSWORD`
 - **Pub/Sub** -- SUBSCRIBE, UNSUBSCRIBE, PUBLISH
 - **TTL support** -- EX, PX, EXPIRE, PEXPIRE, PERSIST, TTL, PTTL
-- **856KB Docker image** -- the entire database fits in under 1MB. Redis is 30MB. Dragonfly is 180MB.
 - **MIT licensed** -- no license rug-pulls, unlike Redis (RSALv2/SSPL)
 
 ## Quick Start
@@ -158,10 +167,10 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 220 tests across unit and integration suites.
+Lux has 246 tests across unit and integration suites.
 
 ```bash
-cargo test -- --test-threads=1
+cargo test
 ```
 
 | Suite | Tests | What it covers |
@@ -169,13 +178,16 @@ cargo test -- --test-threads=1
 | **Unit: cmd** | 62 | Every command handler, arg validation, error paths |
 | **Unit: store** | 66 | All data structures, TTL, shard versioning, expiry |
 | **Unit: resp** | 19 | RESP parser, serializers, edge cases |
-| **Unit: snapshot** | 7 | Roundtrip all data types, TTL preservation |
+| **Unit: snapshot** | 7 | Roundtrip all data types including streams, TTL preservation |
 | **Unit: pubsub** | 5 | Broker subscribe/publish/isolation |
 | **Integration: transactions** | 29 | MULTI/EXEC, WATCH/UNWATCH, EXECABORT, DISCARD |
 | **Integration: auth** | 6 | Password gating, per-connection state, error paths |
 | **Integration: pubsub** | 10 | Cross-connection message delivery, unsubscribe, sub mode |
 | **Integration: persistence** | 3 | Snapshot save/restart/restore, FLUSHDB+SAVE |
 | **Integration: pipelines** | 3 | Ordering under contention, fast-path batching |
+| **Integration: blocking** | 6 | BLPOP/BRPOP immediate, timeout, woken-by-push, BLMOVE |
+| **Integration: streams** | 10 | XADD, XREAD, XREADGROUP, XACK, XREAD BLOCK, consumer groups |
+| **Integration: lua** | 10 | EVAL, EVALSHA, redis.call, KEYS/ARGV, SCRIPT LOAD/EXISTS/FLUSH |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -201,26 +213,28 @@ Release and Docker builds only proceed after tests pass.
 
 **Keys:** `DEL` `UNLINK` `EXISTS` `KEYS` `SCAN` `TYPE` `RENAME` `RENAMENX` `RANDOMKEY` `COPY` `TTL` `PTTL` `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT` `EXPIRETIME` `PEXPIRETIME` `PERSIST` `DBSIZE` `FLUSHDB` `FLUSHALL`
 
-**Lists:** `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LRANGE` `LINDEX` `LSET` `LINSERT` `LREM` `LTRIM` `LPOS` `LMOVE` `RPOPLPUSH`
+**Lists:** `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `BLPOP` `BRPOP` `BLMOVE` `LLEN` `LRANGE` `LINDEX` `LSET` `LINSERT` `LREM` `LTRIM` `LPOS` `LMOVE` `RPOPLPUSH`
 
 **Hashes:** `HSET` `HSETNX` `HMSET` `HGET` `HMGET` `HDEL` `HGETALL` `HKEYS` `HVALS` `HLEN` `HEXISTS` `HINCRBY` `HINCRBYFLOAT` `HSTRLEN` `HRANDFIELD` `HSCAN`
 
 **Sets:** `SADD` `SREM` `SMEMBERS` `SISMEMBER` `SMISMEMBER` `SCARD` `SPOP` `SRANDMEMBER` `SMOVE` `SUNION` `SINTER` `SDIFF` `SUNIONSTORE` `SINTERSTORE` `SDIFFSTORE` `SINTERCARD` `SSCAN`
 
-**Sorted Sets:** `ZADD` `ZSCORE` `ZMSCORE` `ZRANK` `ZREVRANK` `ZREM` `ZCARD` `ZCOUNT` `ZLEXCOUNT` `ZINCRBY` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE` `ZREVRANGEBYSCORE` `ZRANGEBYLEX` `ZREVRANGEBYLEX` `ZPOPMIN` `ZPOPMAX` `ZUNIONSTORE` `ZINTERSTORE` `ZDIFFSTORE` `ZREMRANGEBYRANK` `ZREMRANGEBYSCORE` `ZREMRANGEBYLEX` `ZSCAN`
+**Sorted Sets:** `ZADD` `ZSCORE` `ZMSCORE` `ZRANK` `ZREVRANK` `ZREM` `ZCARD` `ZCOUNT` `ZLEXCOUNT` `ZINCRBY` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE` `ZREVRANGEBYSCORE` `ZRANGEBYLEX` `ZREVRANGEBYLEX` `ZPOPMIN` `ZPOPMAX` `BZPOPMIN` `BZPOPMAX` `ZUNIONSTORE` `ZINTERSTORE` `ZDIFFSTORE` `ZREMRANGEBYRANK` `ZREMRANGEBYSCORE` `ZREMRANGEBYLEX` `ZSCAN`
+
+**Streams:** `XADD` `XLEN` `XRANGE` `XREVRANGE` `XREAD` `XREADGROUP` `XGROUP CREATE` `XGROUP DESTROY` `XACK` `XPENDING` `XCLAIM` `XAUTOCLAIM` `XDEL` `XTRIM` `XINFO STREAM` `XINFO GROUPS`
 
 **Pub/Sub:** `PUBLISH` `SUBSCRIBE` `UNSUBSCRIBE`
 
 **Transactions:** `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
 
-**Server:** `PING` `ECHO` `HELLO` `INFO` `TIME` `SAVE` `BGSAVE` `LASTSAVE` `AUTH` `CONFIG` `CLIENT` `SELECT` `COMMAND` `OBJECT` `MEMORY`
+**Scripting:** `EVAL` `EVALSHA` `SCRIPT LOAD` `SCRIPT EXISTS` `SCRIPT FLUSH`
+
+**Server:** `PING` `ECHO` `QUIT` `HELLO` `INFO` `TIME` `SAVE` `BGSAVE` `LASTSAVE` `AUTH` `CONFIG` `CLIENT` `SELECT` `COMMAND` `OBJECT` `MEMORY`
 
 ## Known Differences from Redis
 
 Lux is Redis-compatible but not identical. Key differences:
 
-- **No Lua scripting** -- `EVAL`, `EVALSHA`, and `SCRIPT` are not supported
-- **No blocking commands** -- `BLPOP`, `BRPOP`, `BLMOVE` etc. are not supported
 - **No AOF persistence** -- snapshots only (configurable interval)
 - **No RESP3 protocol** -- RESP2 only
 - **No cluster mode** -- single-node only (use Lux Cloud for managed hosting)

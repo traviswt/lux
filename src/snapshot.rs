@@ -93,6 +93,7 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
             DumpValue::Set(_) => b'T',
             DumpValue::SortedSet(_) => b'Z',
             DumpValue::Stream(..) => b'X',
+            DumpValue::Vector(..) => b'V',
         };
         w.write_all(&[type_byte])?;
         write_bytes(w, entry.key.as_bytes())?;
@@ -138,6 +139,21 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
                     for (k, v) in fields {
                         write_bytes(w, k.as_bytes())?;
                         write_bytes(w, v)?;
+                    }
+                }
+            }
+            DumpValue::Vector(data, metadata) => {
+                write_u32(w, data.len() as u32)?;
+                for f in data {
+                    w.write_all(&f.to_le_bytes())?;
+                }
+                match metadata {
+                    Some(m) => {
+                        w.write_all(&[1u8])?;
+                        write_bytes(w, m.as_bytes())?;
+                    }
+                    None => {
+                        w.write_all(&[0u8])?;
                     }
                 }
             }
@@ -239,6 +255,23 @@ fn load_binary(store: &Store, r: &mut impl Read) -> io::Result<usize> {
                     entries.push((id, fields));
                 }
                 DumpValue::Stream(entries, last_id)
+            }
+            b'V' => {
+                let dims = read_u32(r)? as usize;
+                let mut data = Vec::with_capacity(dims);
+                for _ in 0..dims {
+                    let mut buf = [0u8; 4];
+                    r.read_exact(&mut buf)?;
+                    data.push(f32::from_le_bytes(buf));
+                }
+                let mut flag = [0u8; 1];
+                r.read_exact(&mut flag)?;
+                let metadata = if flag[0] == 1 {
+                    Some(read_string(r)?)
+                } else {
+                    None
+                };
+                DumpValue::Vector(data, metadata)
             }
             _ => {
                 return Err(io::Error::new(
@@ -449,6 +482,7 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
             DumpValue::Set(_) => 'T',
             DumpValue::SortedSet(_) => 'Z',
             DumpValue::Stream(..) => 'X',
+            DumpValue::Vector(..) => continue,
         };
         let encoded_value = match &entry.value {
             DumpValue::Str(s) => String::from_utf8_lossy(s).into_owned(),
@@ -481,6 +515,7 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
                     .collect();
                 format!("{}\x1c{}", last_id, entries_str.join("\x1f"))
             }
+            DumpValue::Vector(..) => unreachable!(),
         };
         writeln!(
             file,

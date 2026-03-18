@@ -250,6 +250,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
         || eq(cmd, b"FLUSHDB")
         || eq(cmd, b"FLUSHALL")
         || eq(cmd, b"COPY")
+        || eq(cmd, b"VSET")
 }
 
 #[cfg(test)]

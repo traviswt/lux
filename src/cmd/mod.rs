@@ -8,6 +8,7 @@ mod sets;
 mod sorted_sets;
 mod streams;
 mod strings;
+mod vectors;
 
 use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
@@ -548,6 +549,20 @@ pub fn execute(
             if cmd_eq(cmd, b"UNWATCH") {
                 resp::write_error(out, &format!("ERR unknown command '{}'", arg_str(cmd)));
                 return CmdResult::Written;
+            }
+        }
+        b'V' => {
+            if cmd_eq(cmd, b"VSET") {
+                return vectors::cmd_vset(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"VGET") {
+                return vectors::cmd_vget(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"VSEARCH") {
+                return vectors::cmd_vsearch(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"VCARD") {
+                return vectors::cmd_vcard(args, store, out, now);
             }
         }
         b'W' => {
@@ -1577,6 +1592,10 @@ pub fn is_known_command(cmd: &[u8]) -> bool {
         || cmd_eq(cmd, b"EVAL")
         || cmd_eq(cmd, b"EVALSHA")
         || cmd_eq(cmd, b"SCRIPT")
+        || cmd_eq(cmd, b"VSET")
+        || cmd_eq(cmd, b"VGET")
+        || cmd_eq(cmd, b"VSEARCH")
+        || cmd_eq(cmd, b"VCARD")
 }
 
 pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
@@ -1710,8 +1729,13 @@ pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
         || cmd_eq(cmd, b"CONFIG")
         || cmd_eq(cmd, b"CLIENT")
         || cmd_eq(cmd, b"SELECT")
+        || cmd_eq(cmd, b"VCARD")
     {
         1
+    } else if cmd_eq(cmd, b"VGET") {
+        2
+    } else if cmd_eq(cmd, b"VSET") || cmd_eq(cmd, b"VSEARCH") {
+        4
     } else {
         return Ok(());
     };

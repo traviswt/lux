@@ -112,6 +112,13 @@ pub fn num_shards() -> usize {
 pub const MAX_SHARDS: usize = 1024;
 const WRONGTYPE: &str = "WRONGTYPE Operation against a key holding the wrong kind of value";
 
+pub struct VectorData {
+    #[allow(dead_code)]
+    pub dims: u32,
+    pub data: Vec<f32>,
+    pub metadata: Option<String>,
+}
+
 pub enum StoreValue {
     Str(Bytes),
     List(VecDeque<Bytes>),
@@ -122,6 +129,7 @@ pub enum StoreValue {
         HashMap<String, f64>,
     ),
     Stream(StreamData),
+    Vector(VectorData),
 }
 
 impl StoreValue {
@@ -133,6 +141,7 @@ impl StoreValue {
             StoreValue::Set(_) => "set",
             StoreValue::SortedSet(..) => "zset",
             StoreValue::Stream(_) => "stream",
+            StoreValue::Vector(_) => "vector",
         }
     }
 }
@@ -189,6 +198,9 @@ pub fn estimate_entry_memory(key: &str, value: &StoreValue) -> usize {
         StoreValue::Hash(h) => h.iter().map(|(k, v)| k.len() + v.len() + 64).sum(),
         StoreValue::Set(s) => s.iter().map(|m| m.len() + 32).sum(),
         StoreValue::SortedSet(_, scores) => scores.iter().map(|(m, _)| m.len() + 48).sum(),
+        StoreValue::Vector(v) => {
+            16 + (v.data.len() * 4) + v.metadata.as_ref().map_or(0, |m| m.len())
+        }
         StoreValue::Stream(s) => s
             .entries
             .values()
@@ -1977,6 +1989,9 @@ impl Store {
                                 .collect();
                             DumpValue::Stream(entries, s.last_id.to_string())
                         }
+                        StoreValue::Vector(v) => {
+                            DumpValue::Vector(v.data.clone(), v.metadata.clone())
+                        }
                     },
                     ttl_ms,
                 });
@@ -2021,6 +2036,14 @@ impl Store {
                     entries,
                     last_id,
                     groups: std::collections::HashMap::new(),
+                })
+            }
+            DumpValue::Vector(data, metadata) => {
+                let dims = data.len() as u32;
+                StoreValue::Vector(VectorData {
+                    dims,
+                    data,
+                    metadata,
                 })
             }
         };
@@ -3304,6 +3327,140 @@ impl Store {
             }
         }
     }
+
+    pub fn vset(
+        &self,
+        key: &[u8],
+        data: Vec<f32>,
+        metadata: Option<String>,
+        ttl: Option<Duration>,
+        now: Instant,
+    ) {
+        let idx = self.shard_index(key);
+        let mut shard = self.shards[idx].write();
+        shard.version += 1;
+        let ks = key_string(key);
+        let dims = data.len() as u32;
+        let new_value = StoreValue::Vector(VectorData {
+            dims,
+            data,
+            metadata,
+        });
+        let new_mem = estimate_entry_memory(&ks, &new_value);
+        let expires_at = ttl.map(|d| now + d);
+        let clock = LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(old) = shard.data.insert(
+            ks.clone(),
+            Entry {
+                value: new_value,
+                expires_at,
+                lru_clock: clock,
+            },
+        ) {
+            let old_mem = estimate_entry_memory(&ks, &old.value);
+            if new_mem >= old_mem {
+                USED_MEMORY.fetch_add(new_mem - old_mem, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                USED_MEMORY.fetch_sub(old_mem - new_mem, std::sync::atomic::Ordering::Relaxed);
+            }
+            shard.used_memory = shard.used_memory.saturating_sub(old_mem) + new_mem;
+        } else {
+            USED_MEMORY.fetch_add(new_mem, std::sync::atomic::Ordering::Relaxed);
+            shard.used_memory += new_mem;
+        }
+    }
+
+    pub fn vget(&self, key: &[u8], now: Instant) -> Option<(Vec<f32>, Option<String>)> {
+        let idx = self.shard_index(key);
+        let shard = self.shards[idx].read();
+        let ks = key_str(key);
+        match shard.data.get(ks) {
+            Some(entry) if !entry.is_expired_at(now) => match &entry.value {
+                StoreValue::Vector(v) => Some((v.data.clone(), v.metadata.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn vsearch(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter_key: Option<&str>,
+        filter_value: Option<&str>,
+        now: Instant,
+    ) -> Vec<(String, f32, Option<String>)> {
+        let mut results: Vec<(String, f32, Option<String>)> = Vec::new();
+        for shard_lock in self.shards.iter() {
+            let shard = shard_lock.read();
+            for (key, entry) in shard.data.iter() {
+                if entry.is_expired_at(now) {
+                    continue;
+                }
+                if let StoreValue::Vector(v) = &entry.value {
+                    if v.data.len() != query.len() {
+                        continue;
+                    }
+                    if let (Some(fk), Some(fv)) = (filter_key, filter_value) {
+                        if let Some(ref meta) = v.metadata {
+                            match serde_json::from_str::<serde_json::Value>(meta) {
+                                Ok(obj) => {
+                                    let matches =
+                                        obj.get(fk).and_then(|val| val.as_str()) == Some(fv);
+                                    if !matches {
+                                        continue;
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    let sim = cosine_similarity(query, &v.data);
+                    results.push((key.clone(), sim, v.metadata.clone()));
+                }
+            }
+        }
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        results
+    }
+
+    pub fn vcard(&self, now: Instant) -> usize {
+        let mut count = 0;
+        for shard_lock in self.shards.iter() {
+            let shard = shard_lock.read();
+            for entry in shard.data.values() {
+                if entry.is_expired_at(now) {
+                    continue;
+                }
+                if matches!(&entry.value, StoreValue::Vector(_)) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+}
+
+#[inline]
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        norm_a += a[i] * a[i];
+        norm_b += b[i] * b[i];
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
+    }
 }
 
 pub type StreamDumpEntry = (String, Vec<(String, Vec<u8>)>);
@@ -3315,6 +3472,7 @@ pub enum DumpValue {
     Set(Vec<String>),
     SortedSet(Vec<(String, f64)>),
     Stream(Vec<StreamDumpEntry>, String),
+    Vector(Vec<f32>, Option<String>),
 }
 
 pub struct DumpEntry {

@@ -1,0 +1,28 @@
+{
+    "name": "@luxdb/sdk",
+    "version": "1.0.0",
+    "description": "Lux SDK - ioredis extended with native vector search",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "files": ["dist"],
+    "scripts": {
+        "build": "tsc",
+        "prepublishOnly": "npm run build"
+    },
+    "dependencies": {
+        "ioredis": "^5.0.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.9.0"
+    },
+    "peerDependencies": {
+        "ioredis": ">=5.0.0"
+    },
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/lux-db/lux",
+        "directory": "sdk"
+    },
+    "keywords": ["lux", "redis", "vector", "search", "database", "ioredis", "similarity"]
+}

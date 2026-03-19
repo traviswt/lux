@@ -1,5 +1,6 @@
 mod cmd;
 mod eviction;
+mod geo;
 mod hnsw;
 mod lua;
 mod pubsub;

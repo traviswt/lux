@@ -1,3 +1,4 @@
+mod geo;
 mod hashes;
 mod keys;
 mod lists;
@@ -240,6 +241,36 @@ pub fn execute(
             }
             if cmd_eq(cmd, b"GETRANGE") {
                 return strings::cmd_getrange(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOADD") {
+                return geo::cmd_geoadd(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEODIST") {
+                return geo::cmd_geodist(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOPOS") {
+                return geo::cmd_geopos(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOHASH") {
+                return geo::cmd_geohash(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOSEARCH") {
+                return geo::cmd_geosearch(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOSEARCHSTORE") {
+                return geo::cmd_geosearchstore(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEORADIUS") {
+                return geo::cmd_georadius(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEORADIUSBYMEMBER") || cmd_eq(cmd, b"GEORADIUSBYMEMBER_RO") {
+                return geo::cmd_georadiusbymember(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEORADIUS_RO") {
+                return geo::cmd_georadius(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"GEOSEARCH_RO") {
+                return geo::cmd_geosearch(args, store, out, now);
             }
         }
         b'H' => {

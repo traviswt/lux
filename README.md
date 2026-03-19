@@ -5,8 +5,8 @@
 <h1 align="center">Lux</h1>
 
 <p align="center">
-  <strong>A Redis-compatible key-value store. 2-7x faster.</strong><br/>
-  Multi-threaded. Built-in vector search. BullMQ-compatible. Written in Rust. MIT licensed forever.
+  <strong>A Redis-compatible key-value store. Up to 10x faster.</strong><br/>
+  Multi-threaded. Built-in vector search. GEO commands. BullMQ-compatible. Written in Rust. MIT licensed forever.
 </p>
 
 <p align="center">
@@ -41,9 +41,9 @@ Point your existing Redis client at Lux. Most workloads just work.
 
 `redis-benchmark`, 50 clients, 1M requests, pipeline=64. Sequential runs (one server at a time) on a 32-core Intel i9-14900K, 128GB RAM, Ubuntu 24.04.
 
-| Command | Lux | Redis 8.6.1 | Lux/Redis |
+| Command | Lux | Redis 8.4.2 | Lux/Redis |
 |---------|-----|-------------|-----------|
-| SET | 11.2M | 3.3M | **3.4x** |
+| SET | 10.2M | 3.4M | **3.0x** |
 | GET | 12.0M | 4.7M | **2.6x** |
 | INCR | 6.3M | 4.0M | **1.6x** |
 | LPUSH | 6.5M | 3.3M | **2.0x** |
@@ -55,10 +55,14 @@ Point your existing Redis client at Lux. Most workloads just work.
 | SPOP | 12.2M | 4.5M | **2.7x** |
 | ZADD | 7.0M | 3.1M | **2.3x** |
 | ZPOPMIN | 11.5M | 5.3M | **2.2x** |
+| GEOPOS | 5.26M | 2.60M | **2.0x** |
+| GEODIST | 6.67M | 2.53M | **2.6x** |
+| GEOSEARCH (500km) | 4.44M | 559K | **8.0x** |
+| GEOSEARCH (5000km) | 200K | 20K | **10.0x** |
 
-Lux beats Redis on every single-key command. At pipeline=1, both are network-bound and roughly equal. The gap grows with pipeline depth because Lux batches same-shard commands under a single lock while Redis processes sequentially on one core.
+Lux beats Redis on every supported command. At pipeline=1, both are network-bound and roughly equal. The gap grows with pipeline depth because Lux batches same-shard commands under a single lock while Redis processes sequentially on one core. GEO commands see the biggest gains because GEOSEARCH parallelizes across shards while Redis scans single-threaded.
 
-Full results including SET scaling by pipeline depth (up to **6.85x** at pipeline=512) in [BENCHMARKS.md](BENCHMARKS.md). Reproduce with `./bench.sh`.
+Full results including SET scaling by pipeline depth (up to **5.8x** at pipeline=512) in [BENCHMARKS.md](BENCHMARKS.md). Reproduce with `./bench.sh`.
 
 ## Lux Cloud
 
@@ -66,8 +70,9 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **170+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, pub/sub, transactions
+- **180+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, pub/sub, transactions
 - **Native vector search** -- VSET, VGET, VSEARCH with cosine similarity and metadata filtering. No extensions, no sidecars
+- **GEO commands** -- GEOADD, GEOSEARCH, GEODIST, GEOPOS, GEOHASH, GEORADIUS with up to 10x faster spatial queries
 - **LRU eviction** -- maxmemory with allkeys-lru, volatile-lru, allkeys-random, volatile-random policies
 - **BullMQ compatible** -- blocking commands, streams, Lua scripting with cmsgpack/cjson
 - **Lua scripting** -- EVAL, EVALSHA, SCRIPT with redis.call/pcall, cmsgpack, and cjson
@@ -209,7 +214,7 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 266 tests across unit and integration suites.
+Lux has 303 tests across unit and integration suites.
 
 ```bash
 cargo test
@@ -231,6 +236,7 @@ cargo test
 | **Integration: streams** | 10 | XADD, XREAD, XREADGROUP, XACK, XREAD BLOCK, consumer groups |
 | **Integration: lua** | 10 | EVAL, EVALSHA, redis.call, KEYS/ARGV, SCRIPT LOAD/EXISTS/FLUSH |
 | **Integration: vectors** | 10 | VSET, VGET, VSEARCH, VCARD, metadata filtering, TTL, dimension validation |
+| **Integration: geo** | 14 | GEOADD, GEODIST, GEOPOS, GEOHASH, GEOSEARCH, GEOSEARCHSTORE, GEORADIUS, edge cases |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -263,6 +269,8 @@ Release and Docker builds only proceed after tests pass.
 **Sets:** `SADD` `SREM` `SMEMBERS` `SISMEMBER` `SMISMEMBER` `SCARD` `SPOP` `SRANDMEMBER` `SMOVE` `SUNION` `SINTER` `SDIFF` `SUNIONSTORE` `SINTERSTORE` `SDIFFSTORE` `SINTERCARD` `SSCAN`
 
 **Sorted Sets:** `ZADD` `ZSCORE` `ZMSCORE` `ZRANK` `ZREVRANK` `ZREM` `ZCARD` `ZCOUNT` `ZLEXCOUNT` `ZINCRBY` `ZRANGE` `ZREVRANGE` `ZRANGEBYSCORE` `ZREVRANGEBYSCORE` `ZRANGEBYLEX` `ZREVRANGEBYLEX` `ZPOPMIN` `ZPOPMAX` `BZPOPMIN` `BZPOPMAX` `ZUNIONSTORE` `ZINTERSTORE` `ZDIFFSTORE` `ZREMRANGEBYRANK` `ZREMRANGEBYSCORE` `ZREMRANGEBYLEX` `ZSCAN`
+
+**Geo:** `GEOADD` `GEODIST` `GEOPOS` `GEOHASH` `GEOSEARCH` `GEOSEARCHSTORE` `GEORADIUS` `GEORADIUSBYMEMBER` `GEORADIUS_RO` `GEORADIUSBYMEMBER_RO`
 
 **Streams:** `XADD` `XLEN` `XRANGE` `XREVRANGE` `XREAD` `XREADGROUP` `XGROUP CREATE` `XGROUP DESTROY` `XACK` `XPENDING` `XCLAIM` `XAUTOCLAIM` `XDEL` `XTRIM` `XINFO STREAM` `XINFO GROUPS`
 

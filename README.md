@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A Redis-compatible key-value store. 2-7x faster.</strong><br/>
-  Multi-threaded. BullMQ-compatible. Written in Rust. MIT licensed forever.
+  Multi-threaded. Built-in vector search. BullMQ-compatible. Written in Rust. MIT licensed forever.
 </p>
 
 <p align="center">
@@ -62,16 +62,13 @@ Full results including SET scaling by pipeline depth (up to **6.85x** at pipelin
 
 ## Lux Cloud
 
-Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is managed Lux hosting.
-
-- **$5/mo** per instance, 1GB memory
-- 4x more memory than Redis Cloud at the same price
-- Deploy in seconds, connect with any Redis client
-- Persistence, monitoring, and web console included
+Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is managed Lux hosting. Deploy in seconds, connect with any Redis client. Includes BullMQ queue dashboard, agent memory MCP server, persistence, monitoring, and web console.
 
 ## Features
 
-- **160+ Redis commands** -- strings, lists, hashes, sets, sorted sets, streams, pub/sub, transactions
+- **170+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, pub/sub, transactions
+- **Native vector search** -- VSET, VGET, VSEARCH with cosine similarity and metadata filtering. No extensions, no sidecars
+- **LRU eviction** -- maxmemory with allkeys-lru, volatile-lru, allkeys-random, volatile-random policies
 - **BullMQ compatible** -- blocking commands, streams, Lua scripting with cmsgpack/cjson
 - **Lua scripting** -- EVAL, EVALSHA, SCRIPT with redis.call/pcall, cmsgpack, and cjson
 - **Redis Streams** -- XADD, XREAD, XREADGROUP, XACK, consumer groups, blocking reads
@@ -117,6 +114,27 @@ docker compose up -d --build  # rebuild & start
 docker compose down         # stop
 ```
 
+### Vector Search
+
+Lux has native vector storage and cosine similarity search. No extensions, no sidecars, no separate services.
+
+```bash
+# Store vectors with optional metadata
+redis-cli VSET doc:1 3 0.1 0.2 0.3 META '{"title":"hello world"}'
+redis-cli VSET doc:2 3 0.9 0.1 0.0 META '{"title":"another doc"}'
+
+# Find the 5 nearest neighbors
+redis-cli VSEARCH 3 0.1 0.2 0.3 K 5
+
+# Search with metadata filtering
+redis-cli VSEARCH 3 0.1 0.2 0.3 K 5 FILTER title "hello world" META
+
+# Count vectors
+redis-cli VCARD
+```
+
+2ms search latency over 1,000 vectors at 1536 dimensions (OpenAI embedding size). Built for AI agent memory, RAG, and semantic search.
+
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -126,6 +144,9 @@ docker compose down         # stop
 | `LUX_DATA_DIR` | `.` | Snapshot directory |
 | `LUX_SAVE_INTERVAL` | `60` | Snapshot interval in seconds (0 to disable) |
 | `LUX_SHARDS` | auto | Shard count (default: num_cpus * 16) |
+| `LUX_MAXMEMORY` | `0` (unlimited) | Memory limit (e.g. `100mb`, `1gb`) |
+| `LUX_MAXMEMORY_POLICY` | `noeviction` | Eviction policy: `allkeys-lru`, `volatile-lru`, `allkeys-random`, `volatile-random` |
+| `LUX_MAXMEMORY_SAMPLES` | `5` | Keys sampled per eviction round |
 | `LUX_RESTRICTED` | (none) | Set to `1` to disable KEYS, FLUSHALL, FLUSHDB |
 
 ### Node.js (ioredis)
@@ -167,7 +188,7 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 246 tests across unit and integration suites.
+Lux has 266 tests across unit and integration suites.
 
 ```bash
 cargo test
@@ -188,6 +209,7 @@ cargo test
 | **Integration: blocking** | 6 | BLPOP/BRPOP immediate, timeout, woken-by-push, BLMOVE |
 | **Integration: streams** | 10 | XADD, XREAD, XREADGROUP, XACK, XREAD BLOCK, consumer groups |
 | **Integration: lua** | 10 | EVAL, EVALSHA, redis.call, KEYS/ARGV, SCRIPT LOAD/EXISTS/FLUSH |
+| **Integration: vectors** | 10 | VSET, VGET, VSEARCH, VCARD, metadata filtering, TTL, dimension validation |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -226,6 +248,8 @@ Release and Docker builds only proceed after tests pass.
 **Pub/Sub:** `PUBLISH` `SUBSCRIBE` `UNSUBSCRIBE`
 
 **Transactions:** `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
+
+**Vectors:** `VSET` `VGET` `VSEARCH` `VCARD`
 
 **Scripting:** `EVAL` `EVALSHA` `SCRIPT LOAD` `SCRIPT EXISTS` `SCRIPT FLUSH`
 

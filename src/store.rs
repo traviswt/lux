@@ -168,6 +168,7 @@ pub(crate) struct Shard {
 
 pub struct Store {
     shards: Box<[RwLock<Shard>]>,
+    pub(crate) vector_index: RwLock<crate::hnsw::HnswIndex>,
 }
 
 #[inline(always)]
@@ -229,6 +230,7 @@ impl Store {
             .collect();
         Self {
             shards: shards.into_boxed_slice(),
+            vector_index: RwLock::new(crate::hnsw::HnswIndex::new(0)),
         }
     }
 
@@ -461,15 +463,26 @@ impl Store {
 
     pub fn del(&self, keys: &[&[u8]]) -> i64 {
         let mut count = 0i64;
+        let mut vector_keys_removed: Vec<String> = Vec::new();
         for key in keys {
             let idx = self.shard_index(key);
             let mut shard = self.shards[idx].write();
             shard.version += 1;
             if let Some(entry) = shard.data.remove(key_str(key)) {
+                let is_vector = matches!(&entry.value, StoreValue::Vector(_));
                 let mem = estimate_entry_memory(key_str(key), &entry.value);
                 shard.used_memory = shard.used_memory.saturating_sub(mem);
                 USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
+                if is_vector {
+                    vector_keys_removed.push(key_str(key).to_string());
+                }
                 count += 1;
+            }
+        }
+        if !vector_keys_removed.is_empty() {
+            let mut index = self.vector_index.write();
+            for k in &vector_keys_removed {
+                index.remove(k);
             }
         }
         count
@@ -728,6 +741,7 @@ impl Store {
             USED_MEMORY.fetch_sub(shard.used_memory, std::sync::atomic::Ordering::Relaxed);
             shard.used_memory = 0;
         }
+        *self.vector_index.write() = crate::hnsw::HnswIndex::new(0);
     }
 
     pub fn lpush(&self, key: &[u8], values: &[&[u8]], now: Instant) -> Result<i64, String> {
@@ -2040,11 +2054,28 @@ impl Store {
             }
             DumpValue::Vector(data, metadata) => {
                 let dims = data.len() as u32;
-                StoreValue::Vector(VectorData {
+                let index_data = data.clone();
+                let key_clone = key.clone();
+                let sv = StoreValue::Vector(VectorData {
                     dims,
                     data,
                     metadata,
-                })
+                });
+                let expires_at = ttl.map(|d| Instant::now() + d);
+                let mem = estimate_entry_memory(&key, &sv);
+                shard.data.insert(
+                    key,
+                    Entry {
+                        value: sv,
+                        expires_at,
+                        lru_clock: LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
+                    },
+                );
+                shard.used_memory += mem;
+                USED_MEMORY.fetch_add(mem, std::sync::atomic::Ordering::Relaxed);
+                drop(shard);
+                self.vector_index.write().insert(key_clone, index_data);
+                return;
             }
         };
         let expires_at = ttl.map(|d| Instant::now() + d);
@@ -3292,6 +3323,7 @@ impl Store {
         now.hash(&mut hasher);
         let seed = hasher.finish() as usize;
 
+        let mut expired_vectors: Vec<String> = Vec::new();
         for (i, shard) in self.shards.iter().enumerate() {
             let should_check = {
                 let shard = shard.read();
@@ -3315,15 +3347,25 @@ impl Store {
                 let should_remove = shard.data.get(&key).is_some_and(|e| e.is_expired_at(now));
                 if should_remove {
                     if let Some(entry) = shard.data.remove(&key) {
+                        let is_vector = matches!(&entry.value, StoreValue::Vector(_));
                         let mem = estimate_entry_memory(&key, &entry.value);
                         shard.used_memory = shard.used_memory.saturating_sub(mem);
                         USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
+                        if is_vector {
+                            expired_vectors.push(key);
+                        }
                     }
                     removed_any = true;
                 }
             }
             if removed_any {
                 shard.version += 1;
+            }
+        }
+        if !expired_vectors.is_empty() {
+            let mut index = self.vector_index.write();
+            for k in &expired_vectors {
+                index.remove(k);
             }
         }
     }
@@ -3341,6 +3383,7 @@ impl Store {
         shard.version += 1;
         let ks = key_string(key);
         let dims = data.len() as u32;
+        let index_data = data.clone();
         let new_value = StoreValue::Vector(VectorData {
             dims,
             data,
@@ -3368,6 +3411,8 @@ impl Store {
             USED_MEMORY.fetch_add(new_mem, std::sync::atomic::Ordering::Relaxed);
             shard.used_memory += new_mem;
         }
+        drop(shard);
+        self.vector_index.write().insert(ks, index_data);
     }
 
     pub fn vget(&self, key: &[u8], now: Instant) -> Option<(Vec<f32>, Option<String>)> {
@@ -3391,24 +3436,28 @@ impl Store {
         filter_value: Option<&str>,
         now: Instant,
     ) -> Vec<(String, f32, Option<String>)> {
+        let has_filter = filter_key.is_some() && filter_value.is_some();
+        let fetch_count = if has_filter { k * 10 } else { k };
+        let index = self.vector_index.read();
+        let candidates = index.search(query, fetch_count);
+        drop(index);
+
         let mut results: Vec<(String, f32, Option<String>)> = Vec::new();
-        for shard_lock in self.shards.iter() {
-            let shard = shard_lock.read();
-            for (key, entry) in shard.data.iter() {
+        for (key, sim) in candidates {
+            let idx = self.shard_index(key.as_bytes());
+            let shard = self.shards[idx].read();
+            if let Some(entry) = shard.data.get(&key) {
                 if entry.is_expired_at(now) {
                     continue;
                 }
                 if let StoreValue::Vector(v) = &entry.value {
-                    if v.data.len() != query.len() {
-                        continue;
-                    }
-                    if let (Some(fk), Some(fv)) = (filter_key, filter_value) {
+                    if has_filter {
+                        let fk = filter_key.unwrap();
+                        let fv = filter_value.unwrap();
                         if let Some(ref meta) = v.metadata {
                             match serde_json::from_str::<serde_json::Value>(meta) {
                                 Ok(obj) => {
-                                    let matches =
-                                        obj.get(fk).and_then(|val| val.as_str()) == Some(fv);
-                                    if !matches {
+                                    if obj.get(fk).and_then(|val| val.as_str()) != Some(fv) {
                                         continue;
                                     }
                                 }
@@ -3418,35 +3467,26 @@ impl Store {
                             continue;
                         }
                     }
-                    let sim = cosine_similarity(query, &v.data);
-                    results.push((key.clone(), sim, v.metadata.clone()));
+                    results.push((key, sim, v.metadata.clone()));
+                    if results.len() >= k {
+                        break;
+                    }
                 }
             }
         }
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(k);
         results
     }
 
-    pub fn vcard(&self, now: Instant) -> usize {
-        let mut count = 0;
-        for shard_lock in self.shards.iter() {
-            let shard = shard_lock.read();
-            for entry in shard.data.values() {
-                if entry.is_expired_at(now) {
-                    continue;
-                }
-                if matches!(&entry.value, StoreValue::Vector(_)) {
-                    count += 1;
-                }
-            }
-        }
-        count
+    pub fn vcard(&self, _now: Instant) -> usize {
+        self.vector_index.read().len()
     }
 }
 
 #[inline]
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;

@@ -465,6 +465,7 @@ impl Store {
     }
 
     pub fn del(&self, keys: &[&[u8]]) -> i64 {
+        let now = Instant::now();
         let mut count = 0i64;
         let mut vector_keys_removed: Vec<String> = Vec::new();
         for key in keys {
@@ -472,6 +473,7 @@ impl Store {
             let mut shard = self.shards[idx].write();
             shard.version += 1;
             if let Some(entry) = shard.data.remove(key_str(key)) {
+                let expired = entry.is_expired_at(now);
                 let is_vector = matches!(&entry.value, StoreValue::Vector(_));
                 let mem = estimate_entry_memory(key_str(key), &entry.value);
                 shard.used_memory = shard.used_memory.saturating_sub(mem);
@@ -479,7 +481,9 @@ impl Store {
                 if is_vector {
                     vector_keys_removed.push(key_str(key).to_string());
                 }
-                count += 1;
+                if !expired {
+                    count += 1;
+                }
             }
         }
         if !vector_keys_removed.is_empty() {

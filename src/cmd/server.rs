@@ -184,6 +184,7 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
          used_memory_bytes:{}\r\n\
          \r\n\
          # Keyspace\r\n\
+         db0:keys={},expires=0,avg_ttl=0\r\n\
          keys:{}\r\n\
          vector_keys:{}\r\n",
         env!("CARGO_PKG_VERSION"),
@@ -192,6 +193,7 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
         CONNECTED_CLIENTS.load(Ordering::Relaxed),
         TOTAL_COMMANDS.load(Ordering::Relaxed),
         store.approximate_memory(),
+        store.dbsize(now),
         store.dbsize(now),
         store.vcard(now)
     )

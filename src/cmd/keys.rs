@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::resp;
 use crate::store::{Store, StoreValue};
 
-use super::{arg_str, cmd_eq, parse_u64, CmdResult};
+use super::{arg_str, cmd_eq, parse_i64, parse_u64, CmdResult};
 
 pub fn cmd_del(args: &[&[u8]], store: &Store, out: &mut BytesMut, _now: Instant) -> CmdResult {
     if args.len() < 2 {
@@ -159,11 +159,24 @@ pub fn cmd_copy(args: &[&[u8]], store: &Store, out: &mut BytesMut, now: Instant)
             replace = true;
             i += 1;
         } else if cmd_eq(args[i], b"DESTINATION") || cmd_eq(args[i], b"DB") {
-            if i + 1 < args.len() {
-                resp::write_error(out, "ERR COPY with DB is not supported");
+            i += 1;
+            if i >= args.len() {
+                resp::write_error(out, "ERR syntax error");
                 return CmdResult::Written;
             }
-            i += 2;
+            match parse_i64(args[i]) {
+                Ok(0) => {
+                    i += 1;
+                }
+                Ok(_) => {
+                    resp::write_error(out, "ERR invalid DB index");
+                    return CmdResult::Written;
+                }
+                Err(_) => {
+                    resp::write_error(out, "ERR value is not an integer or out of range");
+                    return CmdResult::Written;
+                }
+            }
         } else {
             resp::write_error(out, "ERR syntax error");
             return CmdResult::Written;

@@ -209,47 +209,81 @@ pub fn cmd_hrandfield(
         return CmdResult::Written;
     }
     let count = if args.len() > 2 {
-        parse_i64(args[2]).unwrap_or(1)
+        match parse_i64(args[2]) {
+            Ok(c) => c,
+            Err(_) => {
+                resp::write_error(out, "ERR value is not an integer or out of range");
+                return CmdResult::Written;
+            }
+        }
     } else {
         0
     };
     let with_values = args.len() > 3 && cmd_eq(args[3], b"WITHVALUES");
+    let allow_dup = count < 0;
+    let abs_count = match count.checked_abs() {
+        Some(v) if with_values && v > i64::MAX / 2 => {
+            resp::write_error(out, "ERR value is out of range");
+            return CmdResult::Written;
+        }
+        Some(v) => v as usize,
+        None => {
+            resp::write_error(out, "ERR value is out of range");
+            return CmdResult::Written;
+        }
+    };
     let idx = store.shard_for_key(args[1]);
     let shard = store.lock_read_shard(idx);
     let ks = arg_str(args[1]);
     match shard.data.get(ks) {
         Some(entry) if !entry.is_expired_at(now) => {
             if let StoreValue::Hash(map) = &entry.value {
-                let abs = if count == 0 {
-                    1usize
-                } else {
-                    count.unsigned_abs() as usize
-                };
-                let all: Vec<_> = map.iter().collect();
-                let seed = now.elapsed().as_nanos() as usize;
-                let start = if all.is_empty() { 0 } else { seed % all.len() };
-                let fields: Vec<_> = all
-                    .iter()
-                    .cycle()
-                    .skip(start)
-                    .take(abs.min(all.len()))
-                    .collect();
                 if args.len() <= 2 {
-                    if fields.is_empty() {
+                    let all: Vec<_> = map.iter().collect();
+                    if all.is_empty() {
                         resp::write_null(out);
                     } else {
-                        resp::write_bulk(out, fields[0].0);
+                        let seed = now.elapsed().as_nanos() as usize;
+                        let idx = if all.is_empty() { 0 } else { seed % all.len() };
+                        resp::write_bulk(out, all[idx].0);
                     }
-                } else if with_values {
-                    resp::write_array_header(out, fields.len() * 2);
-                    for (k, v) in &fields {
-                        resp::write_bulk(out, k);
-                        resp::write_bulk_raw(out, v);
-                    }
+                } else if abs_count == 0 {
+                    resp::write_array_header(out, 0);
                 } else {
-                    resp::write_array_header(out, fields.len());
-                    for (k, _) in &fields {
-                        resp::write_bulk(out, k);
+                    let all: Vec<_> = map.iter().collect();
+                    let seed = now.elapsed().as_nanos() as usize;
+                    let n = if allow_dup {
+                        abs_count
+                    } else {
+                        abs_count.min(all.len())
+                    };
+                    let mut fields = Vec::with_capacity(n.min(all.len() * 2));
+                    if allow_dup {
+                        for i in 0..n {
+                            let idx = if all.is_empty() {
+                                0
+                            } else {
+                                (seed.wrapping_add(i * 7919)) % all.len()
+                            };
+                            fields.push(all[idx]);
+                        }
+                    } else {
+                        let start = if all.is_empty() { 0 } else { seed % all.len() };
+                        for i in 0..n {
+                            fields.push(all[(start + i) % all.len()]);
+                        }
+                    }
+                    if with_values {
+                        resp::write_array_header(out, fields.len() * 2);
+                        for (k, v) in &fields {
+                            resp::write_bulk(out, k);
+                            resp::write_bulk_raw(out, v);
+                        }
+                    } else {
+                        resp::write_array_header(out, fields.len());
+                        for (k, _) in &fields {
+                            resp::write_bulk(out, k);
+                        }
                     }
                 }
             } else {

@@ -70,7 +70,7 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **180+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, pub/sub, transactions
+- **180+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, HyperLogLog, pub/sub, transactions
 - **Native vector search** -- VSET, VGET, VSEARCH with cosine similarity and metadata filtering. No extensions, no sidecars
 - **GEO commands** -- GEOADD, GEOSEARCH, GEODIST, GEOPOS, GEOHASH, GEORADIUS with up to 10x faster spatial queries
 - **LRU eviction** -- maxmemory with allkeys-lru, volatile-lru, allkeys-random, volatile-random policies
@@ -214,7 +214,7 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 303 tests across unit and integration suites.
+Lux has 308 tests across unit and integration suites.
 
 ```bash
 cargo test
@@ -237,6 +237,7 @@ cargo test
 | **Integration: lua** | 10 | EVAL, EVALSHA, redis.call, KEYS/ARGV, SCRIPT LOAD/EXISTS/FLUSH |
 | **Integration: vectors** | 10 | VSET, VGET, VSEARCH, VCARD, metadata filtering, TTL, dimension validation |
 | **Integration: geo** | 14 | GEOADD, GEODIST, GEOPOS, GEOHASH, GEOSEARCH, GEOSEARCHSTORE, GEORADIUS, edge cases |
+| **Integration: hll** | 9 | PFADD, PFCOUNT, PFMERGE, cardinality accuracy, multi-key count, merge, WRONGTYPE |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -273,6 +274,8 @@ Release and Docker builds only proceed after tests pass.
 **Geo:** `GEOADD` `GEODIST` `GEOPOS` `GEOHASH` `GEOSEARCH` `GEOSEARCHSTORE` `GEORADIUS` `GEORADIUSBYMEMBER` `GEORADIUS_RO` `GEORADIUSBYMEMBER_RO`
 
 **Streams:** `XADD` `XLEN` `XRANGE` `XREVRANGE` `XREAD` `XREADGROUP` `XGROUP CREATE` `XGROUP DESTROY` `XACK` `XPENDING` `XCLAIM` `XAUTOCLAIM` `XDEL` `XTRIM` `XINFO STREAM` `XINFO GROUPS`
+
+**HyperLogLog:** `PFADD` `PFCOUNT` `PFMERGE`
 
 **Pub/Sub:** `PUBLISH` `SUBSCRIBE` `UNSUBSCRIBE`
 

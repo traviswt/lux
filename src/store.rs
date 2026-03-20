@@ -374,6 +374,32 @@ impl Store {
         }
     }
 
+    pub fn sort_get_elements(&self, key: &[u8], now: Instant) -> Result<Vec<String>, String> {
+        let idx = self.shard_index(key);
+        let shard = self.shards[idx].read();
+        match shard.data.get(key_str(key)) {
+            Some(entry) if !entry.is_expired_at(now) => match &entry.value {
+                StoreValue::List(list) => Ok(list
+                    .iter()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .collect()),
+                StoreValue::Set(set) => Ok(set.iter().cloned().collect()),
+                StoreValue::SortedSet(tree, _) => Ok(tree.keys().map(|(_, m)| m.clone()).collect()),
+                _ => Err(WRONGTYPE.to_string()),
+            },
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    pub fn sort_store(&self, key: &[u8], values: &[String], now: Instant) {
+        self.del(&[key]);
+        if values.is_empty() {
+            return;
+        }
+        let refs: Vec<&[u8]> = values.iter().map(|s| s.as_bytes()).collect();
+        let _ = self.rpush(key, &refs, now);
+    }
+
     pub fn set(&self, key: &[u8], value: &[u8], ttl: Option<Duration>, now: Instant) {
         let idx = self.shard_index(key);
         let mut shard = self.shards[idx].write();

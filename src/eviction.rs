@@ -259,6 +259,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
         || eq(cmd, b"PFMERGE")
         || eq(cmd, b"SETBIT")
         || eq(cmd, b"BITOP")
+        || eq(cmd, b"SORT")
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ mod pubsub;
 mod scripting;
 mod server;
 mod sets;
+mod sort;
 mod sorted_sets;
 mod streams;
 mod strings;
@@ -589,6 +590,9 @@ pub fn execute(
             }
             if cmd_eq(cmd, b"SUBSTR") {
                 return strings::cmd_getrange(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"SORT") || cmd_eq(cmd, b"SORT_RO") {
+                return sort::cmd_sort(args, store, out, now);
             }
             if cmd_eq(cmd, b"SWAPDB") {
                 return server::cmd_noop_ok(args, store, out, now);
@@ -1666,6 +1670,8 @@ pub fn is_known_command(cmd: &[u8]) -> bool {
         || cmd_eq(cmd, b"PFCOUNT")
         || cmd_eq(cmd, b"PFMERGE")
         || cmd_eq(cmd, b"PFDEBUG")
+        || cmd_eq(cmd, b"SORT")
+        || cmd_eq(cmd, b"SORT_RO")
         || cmd_eq(cmd, b"SETBIT")
         || cmd_eq(cmd, b"GETBIT")
         || cmd_eq(cmd, b"BITCOUNT")
@@ -1792,6 +1798,8 @@ pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
         || cmd_eq(cmd, b"PFMERGE")
         || cmd_eq(cmd, b"BITCOUNT")
         || cmd_eq(cmd, b"BITPOS")
+        || cmd_eq(cmd, b"SORT")
+        || cmd_eq(cmd, b"SORT_RO")
     {
         2
     } else if cmd_eq(cmd, b"BLMOVE") || cmd_eq(cmd, b"XCLAIM") || cmd_eq(cmd, b"XAUTOCLAIM") {

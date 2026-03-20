@@ -130,6 +130,7 @@ pub enum StoreValue {
     ),
     Stream(StreamData),
     Vector(VectorData),
+    HyperLogLog(Vec<u8>, u64),
 }
 
 impl StoreValue {
@@ -142,6 +143,7 @@ impl StoreValue {
             StoreValue::SortedSet(..) => "zset",
             StoreValue::Stream(_) => "stream",
             StoreValue::Vector(_) => "vector",
+            StoreValue::HyperLogLog(..) => "string",
         }
     }
 }
@@ -202,6 +204,7 @@ pub fn estimate_entry_memory(key: &str, value: &StoreValue) -> usize {
         StoreValue::Vector(v) => {
             16 + (v.data.len() * 4) + v.metadata.as_ref().map_or(0, |m| m.len())
         }
+        StoreValue::HyperLogLog(regs, _) => regs.len(),
         StoreValue::Stream(s) => s
             .entries
             .values()
@@ -2006,6 +2009,9 @@ impl Store {
                         StoreValue::Vector(v) => {
                             DumpValue::Vector(v.data.clone(), v.metadata.clone())
                         }
+                        StoreValue::HyperLogLog(regs, cached) => {
+                            DumpValue::HyperLogLog(regs.clone(), *cached)
+                        }
                     },
                     ttl_ms,
                 });
@@ -2077,6 +2083,7 @@ impl Store {
                 self.vector_index.write().insert(key_clone, index_data);
                 return;
             }
+            DumpValue::HyperLogLog(regs, cached) => StoreValue::HyperLogLog(regs, cached),
         };
         let expires_at = ttl.map(|d| Instant::now() + d);
         let mem = estimate_entry_memory(&key, &store_value);
@@ -3370,6 +3377,178 @@ impl Store {
         }
     }
 
+    pub fn pfadd(&self, key: &[u8], elements: &[&[u8]], now: Instant) -> Result<i64, String> {
+        let idx = self.shard_index(key);
+        let mut shard = self.shards[idx].write();
+        shard.version += 1;
+        let ks = key_str(key);
+        let entry = shard.data.get_mut(ks);
+        match entry {
+            Some(e) if e.is_expired_at(now) => {
+                let old_mem = estimate_entry_memory(ks, &e.value);
+                let mut regs = vec![0u8; crate::hll::HLL_REGISTERS];
+                let mut changed = false;
+                for elem in elements {
+                    if crate::hll::hll_add(&mut regs, elem) {
+                        changed = true;
+                    }
+                }
+                let cached = crate::hll::hll_count(&regs);
+                e.value = StoreValue::HyperLogLog(regs, cached);
+                e.expires_at = None;
+                e.lru_clock = LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed);
+                let new_mem = estimate_entry_memory(ks, &e.value);
+                if new_mem > old_mem {
+                    let diff = new_mem - old_mem;
+                    shard.used_memory += diff;
+                    USED_MEMORY.fetch_add(diff, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    let diff = old_mem - new_mem;
+                    shard.used_memory = shard.used_memory.saturating_sub(diff);
+                    USED_MEMORY.fetch_sub(diff, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(if changed { 1 } else { 0 })
+            }
+            Some(e) => match &mut e.value {
+                StoreValue::HyperLogLog(regs, cached) => {
+                    e.lru_clock = LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed);
+                    let mut changed = false;
+                    for elem in elements {
+                        if crate::hll::hll_add(regs, elem) {
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        *cached = crate::hll::hll_count(regs);
+                    }
+                    Ok(if changed { 1 } else { 0 })
+                }
+                _ => Err(WRONGTYPE.to_string()),
+            },
+            None => {
+                let mut regs = vec![0u8; crate::hll::HLL_REGISTERS];
+                let mut changed = false;
+                for elem in elements {
+                    if crate::hll::hll_add(&mut regs, elem) {
+                        changed = true;
+                    }
+                }
+                let cached = crate::hll::hll_count(&regs);
+                let sv = StoreValue::HyperLogLog(regs, cached);
+                let mem = estimate_entry_memory(ks, &sv);
+                shard.data.insert(
+                    key_string(key),
+                    Entry {
+                        value: sv,
+                        expires_at: None,
+                        lru_clock: LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
+                    },
+                );
+                shard.used_memory += mem;
+                USED_MEMORY.fetch_add(mem, std::sync::atomic::Ordering::Relaxed);
+                Ok(if changed { 1 } else { 0 })
+            }
+        }
+    }
+
+    pub fn pfcount(&self, keys: &[&[u8]], now: Instant) -> Result<i64, String> {
+        if keys.len() == 1 {
+            let idx = self.shard_index(keys[0]);
+            let shard = self.shards[idx].read();
+            let ks = key_str(keys[0]);
+            match shard.data.get(ks) {
+                Some(e) if !e.is_expired_at(now) => match &e.value {
+                    StoreValue::HyperLogLog(_, cached) => Ok(*cached as i64),
+                    _ => Err(WRONGTYPE.to_string()),
+                },
+                _ => Ok(0),
+            }
+        } else {
+            let mut merged = vec![0u8; crate::hll::HLL_REGISTERS];
+            for key in keys {
+                let idx = self.shard_index(key);
+                let shard = self.shards[idx].read();
+                let ks = key_str(key);
+                match shard.data.get(ks) {
+                    Some(e) if !e.is_expired_at(now) => match &e.value {
+                        StoreValue::HyperLogLog(regs, _) => {
+                            crate::hll::hll_merge(&mut merged, regs);
+                        }
+                        _ => return Err(WRONGTYPE.to_string()),
+                    },
+                    _ => {}
+                }
+            }
+            Ok(crate::hll::hll_count(&merged) as i64)
+        }
+    }
+
+    pub fn pfmerge(&self, dest: &[u8], sources: &[&[u8]], now: Instant) -> Result<(), String> {
+        let mut merged = vec![0u8; crate::hll::HLL_REGISTERS];
+        let dest_idx = self.shard_index(dest);
+        {
+            let shard = self.shards[dest_idx].read();
+            let ks = key_str(dest);
+            if let Some(e) = shard.data.get(ks) {
+                if !e.is_expired_at(now) {
+                    match &e.value {
+                        StoreValue::HyperLogLog(regs, _) => {
+                            crate::hll::hll_merge(&mut merged, regs);
+                        }
+                        _ => return Err(WRONGTYPE.to_string()),
+                    }
+                }
+            }
+        }
+        for src in sources {
+            let idx = self.shard_index(src);
+            let shard = self.shards[idx].read();
+            let ks = key_str(src);
+            if let Some(e) = shard.data.get(ks) {
+                if !e.is_expired_at(now) {
+                    match &e.value {
+                        StoreValue::HyperLogLog(regs, _) => {
+                            crate::hll::hll_merge(&mut merged, regs);
+                        }
+                        _ => return Err(WRONGTYPE.to_string()),
+                    }
+                }
+            }
+        }
+        {
+            let mut shard = self.shards[dest_idx].write();
+            shard.version += 1;
+            let ks = key_str(dest);
+            let cached = crate::hll::hll_count(&merged);
+            let sv = StoreValue::HyperLogLog(merged, cached);
+            let new_mem = estimate_entry_memory(ks, &sv);
+            if let Some(old) = shard.data.get(ks) {
+                let old_mem = estimate_entry_memory(ks, &old.value);
+                if new_mem > old_mem {
+                    let diff = new_mem - old_mem;
+                    shard.used_memory += diff;
+                    USED_MEMORY.fetch_add(diff, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    let diff = old_mem - new_mem;
+                    shard.used_memory = shard.used_memory.saturating_sub(diff);
+                    USED_MEMORY.fetch_sub(diff, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                shard.used_memory += new_mem;
+                USED_MEMORY.fetch_add(new_mem, std::sync::atomic::Ordering::Relaxed);
+            }
+            shard.data.insert(
+                key_string(dest),
+                Entry {
+                    value: sv,
+                    expires_at: None,
+                    lru_clock: LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
+                },
+            );
+        }
+        Ok(())
+    }
+
     pub fn vset(
         &self,
         key: &[u8],
@@ -3513,6 +3692,7 @@ pub enum DumpValue {
     SortedSet(Vec<(String, f64)>),
     Stream(Vec<StreamDumpEntry>, String),
     Vector(Vec<f32>, Option<String>),
+    HyperLogLog(Vec<u8>, u64),
 }
 
 pub struct DumpEntry {

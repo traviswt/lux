@@ -1,5 +1,6 @@
 mod geo;
 mod hashes;
+mod hll;
 mod keys;
 mod lists;
 mod pubsub;
@@ -433,6 +434,19 @@ pub fn execute(
             }
             if cmd_eq(cmd, b"PUBLISH") {
                 return pubsub::cmd_publish(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"PFADD") {
+                return hll::cmd_pfadd(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"PFCOUNT") {
+                return hll::cmd_pfcount(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"PFMERGE") {
+                return hll::cmd_pfmerge(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"PFDEBUG") {
+                resp::write_ok(out);
+                return CmdResult::Written;
             }
             if cmd_eq(cmd, b"PSUBSCRIBE") || cmd_eq(cmd, b"PUNSUBSCRIBE") {
                 resp::write_ok(out);
@@ -1627,6 +1641,10 @@ pub fn is_known_command(cmd: &[u8]) -> bool {
         || cmd_eq(cmd, b"VGET")
         || cmd_eq(cmd, b"VSEARCH")
         || cmd_eq(cmd, b"VCARD")
+        || cmd_eq(cmd, b"PFADD")
+        || cmd_eq(cmd, b"PFCOUNT")
+        || cmd_eq(cmd, b"PFMERGE")
+        || cmd_eq(cmd, b"PFDEBUG")
 }
 
 pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
@@ -1740,6 +1758,9 @@ pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {
         || cmd_eq(cmd, b"XINFO")
         || cmd_eq(cmd, b"XTRIM")
         || cmd_eq(cmd, b"SCRIPT")
+        || cmd_eq(cmd, b"PFADD")
+        || cmd_eq(cmd, b"PFCOUNT")
+        || cmd_eq(cmd, b"PFMERGE")
     {
         2
     } else if cmd_eq(cmd, b"BLMOVE") || cmd_eq(cmd, b"XCLAIM") || cmd_eq(cmd, b"XAUTOCLAIM") {

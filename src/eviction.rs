@@ -255,6 +255,8 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
         || eq(cmd, b"FLUSHALL")
         || eq(cmd, b"COPY")
         || eq(cmd, b"VSET")
+        || eq(cmd, b"PFADD")
+        || eq(cmd, b"PFMERGE")
 }
 
 #[cfg(test)]

@@ -94,6 +94,7 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
             DumpValue::SortedSet(_) => b'Z',
             DumpValue::Stream(..) => b'X',
             DumpValue::Vector(..) => b'V',
+            DumpValue::HyperLogLog(..) => b'P',
         };
         w.write_all(&[type_byte])?;
         write_bytes(w, entry.key.as_bytes())?;
@@ -156,6 +157,10 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
                         w.write_all(&[0u8])?;
                     }
                 }
+            }
+            DumpValue::HyperLogLog(regs, _) => {
+                write_u32(w, regs.len() as u32)?;
+                w.write_all(regs)?;
             }
         }
     }
@@ -272,6 +277,13 @@ fn load_binary(store: &Store, r: &mut impl Read) -> io::Result<usize> {
                     None
                 };
                 DumpValue::Vector(data, metadata)
+            }
+            b'P' => {
+                let len = read_u32(r)? as usize;
+                let mut regs = vec![0u8; len];
+                r.read_exact(&mut regs)?;
+                let cached = crate::hll::hll_count(&regs);
+                DumpValue::HyperLogLog(regs, cached)
             }
             _ => {
                 return Err(io::Error::new(
@@ -482,7 +494,7 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
             DumpValue::Set(_) => 'T',
             DumpValue::SortedSet(_) => 'Z',
             DumpValue::Stream(..) => 'X',
-            DumpValue::Vector(..) => continue,
+            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) => continue,
         };
         let encoded_value = match &entry.value {
             DumpValue::Str(s) => String::from_utf8_lossy(s).into_owned(),
@@ -515,7 +527,7 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
                     .collect();
                 format!("{}\x1c{}", last_id, entries_str.join("\x1f"))
             }
-            DumpValue::Vector(..) => unreachable!(),
+            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) => unreachable!(),
         };
         writeln!(
             file,

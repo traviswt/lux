@@ -119,6 +119,12 @@ pub struct VectorData {
     pub metadata: Option<String>,
 }
 
+pub struct TimeSeriesData {
+    pub samples: Vec<(i64, f64)>,
+    pub retention: u64,
+    pub labels: Vec<(String, String)>,
+}
+
 pub enum StoreValue {
     Str(Bytes),
     List(VecDeque<Bytes>),
@@ -131,6 +137,7 @@ pub enum StoreValue {
     Stream(StreamData),
     Vector(VectorData),
     HyperLogLog(Vec<u8>, u64),
+    TimeSeries(TimeSeriesData),
 }
 
 impl StoreValue {
@@ -144,6 +151,7 @@ impl StoreValue {
             StoreValue::Stream(_) => "stream",
             StoreValue::Vector(_) => "vector",
             StoreValue::HyperLogLog(..) => "string",
+            StoreValue::TimeSeries(_) => "timeseries",
         }
     }
 }
@@ -205,6 +213,13 @@ pub fn estimate_entry_memory(key: &str, value: &StoreValue) -> usize {
             16 + (v.data.len() * 4) + v.metadata.as_ref().map_or(0, |m| m.len())
         }
         StoreValue::HyperLogLog(regs, _) => regs.len(),
+        StoreValue::TimeSeries(ts) => {
+            ts.samples.len() * 16
+                + ts.labels
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len() + 32)
+                    .sum::<usize>()
+        }
         StoreValue::Stream(s) => s
             .entries
             .values()
@@ -801,6 +816,11 @@ impl Store {
                         StoreValue::HyperLogLog(regs, cached) => {
                             DumpValue::HyperLogLog(regs.clone(), *cached)
                         }
+                        StoreValue::TimeSeries(ts) => DumpValue::TimeSeries(
+                            ts.samples.clone(),
+                            ts.retention,
+                            ts.labels.clone(),
+                        ),
                     };
                     (dv, ttl)
                 }
@@ -2111,6 +2131,11 @@ impl Store {
                         StoreValue::HyperLogLog(regs, cached) => {
                             DumpValue::HyperLogLog(regs.clone(), *cached)
                         }
+                        StoreValue::TimeSeries(ts) => DumpValue::TimeSeries(
+                            ts.samples.clone(),
+                            ts.retention,
+                            ts.labels.clone(),
+                        ),
                     },
                     ttl_ms,
                 });
@@ -2183,6 +2208,13 @@ impl Store {
                 return;
             }
             DumpValue::HyperLogLog(regs, cached) => StoreValue::HyperLogLog(regs, cached),
+            DumpValue::TimeSeries(samples, retention, labels) => {
+                StoreValue::TimeSeries(TimeSeriesData {
+                    samples,
+                    retention,
+                    labels,
+                })
+            }
         };
         let expires_at = ttl.map(|d| Instant::now() + d);
         let mem = estimate_entry_memory(&key, &store_value);
@@ -2599,6 +2631,182 @@ impl Store {
         let len = result.len();
         self.set(dest, &result, None, now);
         Ok(len)
+    }
+
+    pub fn tsadd(
+        &self,
+        key: &[u8],
+        timestamp: i64,
+        value: f64,
+        retention: Option<u64>,
+        labels: Option<Vec<(String, String)>>,
+        now: Instant,
+    ) -> Result<i64, String> {
+        let idx = self.shard_index(key);
+        let mut shard = self.shards[idx].write();
+        shard.version += 1;
+        let ks = key_string(key);
+        let entry = shard.data.entry(ks).or_insert_with(|| Entry {
+            value: StoreValue::TimeSeries(TimeSeriesData {
+                samples: Vec::new(),
+                retention: retention.unwrap_or(0),
+                labels: labels.clone().unwrap_or_default(),
+            }),
+            expires_at: None,
+            lru_clock: LRU_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
+        });
+        if entry.is_expired_at(now) {
+            entry.value = StoreValue::TimeSeries(TimeSeriesData {
+                samples: Vec::new(),
+                retention: retention.unwrap_or(0),
+                labels: labels.clone().unwrap_or_default(),
+            });
+            entry.expires_at = None;
+        }
+        match &mut entry.value {
+            StoreValue::TimeSeries(ts) => {
+                if let Some(r) = retention {
+                    ts.retention = r;
+                }
+                if let Some(l) = labels {
+                    ts.labels = l;
+                }
+                let pos = ts.samples.binary_search_by_key(&timestamp, |s| s.0);
+                match pos {
+                    Ok(i) => ts.samples[i].1 = value,
+                    Err(i) => ts.samples.insert(i, (timestamp, value)),
+                }
+                if ts.retention > 0 {
+                    let cutoff = timestamp - ts.retention as i64;
+                    let keep_from = ts.samples.partition_point(|s| s.0 < cutoff);
+                    if keep_from > 0 {
+                        ts.samples.drain(..keep_from);
+                    }
+                }
+                Ok(timestamp)
+            }
+            _ => Err(WRONGTYPE.to_string()),
+        }
+    }
+
+    pub fn tsget(&self, key: &[u8], now: Instant) -> Result<Option<(i64, f64)>, String> {
+        let idx = self.shard_index(key);
+        let shard = self.shards[idx].read();
+        match shard.data.get(key_str(key)) {
+            Some(entry) if !entry.is_expired_at(now) => match &entry.value {
+                StoreValue::TimeSeries(ts) => Ok(ts.samples.last().copied()),
+                _ => Err(WRONGTYPE.to_string()),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn tsrange(
+        &self,
+        key: &[u8],
+        from: i64,
+        to: i64,
+        agg: Option<(&str, i64)>,
+        count: Option<usize>,
+        now: Instant,
+    ) -> Result<Vec<(i64, f64)>, String> {
+        let idx = self.shard_index(key);
+        let shard = self.shards[idx].read();
+        match shard.data.get(key_str(key)) {
+            Some(entry) if !entry.is_expired_at(now) => match &entry.value {
+                StoreValue::TimeSeries(ts) => {
+                    let start = ts.samples.partition_point(|s| s.0 < from);
+                    let end = ts.samples.partition_point(|s| s.0 <= to);
+                    let slice = &ts.samples[start..end];
+
+                    if let Some((agg_fn, bucket_ms)) = agg {
+                        let result = aggregate_samples(slice, agg_fn, bucket_ms);
+                        Ok(match count {
+                            Some(n) => result.into_iter().take(n).collect(),
+                            None => result,
+                        })
+                    } else {
+                        Ok(match count {
+                            Some(n) => slice.iter().take(n).copied().collect(),
+                            None => slice.to_vec(),
+                        })
+                    }
+                }
+                _ => Err(WRONGTYPE.to_string()),
+            },
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn tsinfo(
+        &self,
+        key: &[u8],
+        now: Instant,
+    ) -> Result<
+        Option<(
+            usize,
+            Option<(i64, f64)>,
+            Option<(i64, f64)>,
+            u64,
+            Vec<(String, String)>,
+        )>,
+        String,
+    > {
+        let idx = self.shard_index(key);
+        let shard = self.shards[idx].read();
+        match shard.data.get(key_str(key)) {
+            Some(entry) if !entry.is_expired_at(now) => match &entry.value {
+                StoreValue::TimeSeries(ts) => Ok(Some((
+                    ts.samples.len(),
+                    ts.samples.first().copied(),
+                    ts.samples.last().copied(),
+                    ts.retention,
+                    ts.labels.clone(),
+                ))),
+                _ => Err(WRONGTYPE.to_string()),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn tsmrange(
+        &self,
+        from: i64,
+        to: i64,
+        filters: &[(String, String)],
+        agg: Option<(&str, i64)>,
+        now: Instant,
+    ) -> Vec<(String, Vec<(String, String)>, Vec<(i64, f64)>)> {
+        let mut results = Vec::new();
+        for shard in self.shards.iter() {
+            let shard = shard.read();
+            for (key, entry) in shard.data.iter() {
+                if entry.is_expired_at(now) {
+                    continue;
+                }
+                if let StoreValue::TimeSeries(ts) = &entry.value {
+                    let matches = filters
+                        .iter()
+                        .all(|(fk, fv)| ts.labels.iter().any(|(lk, lv)| lk == fk && lv == fv));
+                    if !matches {
+                        continue;
+                    }
+                    let start = ts.samples.partition_point(|s| s.0 < from);
+                    let end = ts.samples.partition_point(|s| s.0 <= to);
+                    let slice = &ts.samples[start..end];
+                    let samples = if let Some((agg_fn, bucket_ms)) = agg {
+                        aggregate_samples(slice, agg_fn, bucket_ms)
+                    } else {
+                        slice.to_vec()
+                    };
+                    results.push((key.clone(), ts.labels.clone(), samples));
+                }
+            }
+        }
+        results
     }
 
     pub fn unlink(&self, keys: &[&[u8]]) -> i64 {
@@ -4052,6 +4260,74 @@ impl Store {
 }
 
 #[inline]
+fn aggregate_samples(samples: &[(i64, f64)], agg_fn: &str, bucket_ms: i64) -> Vec<(i64, f64)> {
+    if samples.is_empty() || bucket_ms <= 0 {
+        return Vec::new();
+    }
+    let first_ts = samples[0].0;
+    let mut results = Vec::new();
+    let mut bucket_start = (first_ts / bucket_ms) * bucket_ms;
+    let mut bucket_vals: Vec<f64> = Vec::new();
+
+    for &(ts, val) in samples {
+        while ts >= bucket_start + bucket_ms {
+            if !bucket_vals.is_empty() {
+                results.push((bucket_start, compute_agg(&bucket_vals, agg_fn)));
+                bucket_vals.clear();
+            }
+            bucket_start += bucket_ms;
+        }
+        bucket_vals.push(val);
+    }
+    if !bucket_vals.is_empty() {
+        results.push((bucket_start, compute_agg(&bucket_vals, agg_fn)));
+    }
+    results
+}
+
+fn compute_agg(vals: &[f64], agg_fn: &str) -> f64 {
+    match agg_fn {
+        "avg" => vals.iter().sum::<f64>() / vals.len() as f64,
+        "sum" => vals.iter().sum(),
+        "min" => vals.iter().cloned().fold(f64::INFINITY, f64::min),
+        "max" => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        "count" => vals.len() as f64,
+        "first" => vals[0],
+        "last" => vals[vals.len() - 1],
+        "range" => {
+            let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            max - min
+        }
+        "std.p" => {
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+            var.sqrt()
+        }
+        "std.s" => {
+            if vals.len() < 2 {
+                return 0.0;
+            }
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let var =
+                vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+            var.sqrt()
+        }
+        "var.p" => {
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64
+        }
+        "var.s" => {
+            if vals.len() < 2 {
+                return 0.0;
+            }
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64
+        }
+        _ => vals.iter().sum::<f64>() / vals.len() as f64,
+    }
+}
+
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
@@ -4083,6 +4359,7 @@ pub enum DumpValue {
     Stream(Vec<StreamDumpEntry>, String),
     Vector(Vec<f32>, Option<String>),
     HyperLogLog(Vec<u8>, u64),
+    TimeSeries(Vec<(i64, f64)>, u64, Vec<(String, String)>),
 }
 
 pub struct DumpEntry {

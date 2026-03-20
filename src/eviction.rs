@@ -260,6 +260,8 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
         || eq(cmd, b"SETBIT")
         || eq(cmd, b"BITOP")
         || eq(cmd, b"SORT")
+        || eq(cmd, b"TSADD")
+        || eq(cmd, b"TSMADD")
 }
 
 #[cfg(test)]

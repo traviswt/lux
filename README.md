@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A Redis-compatible key-value store. Up to 10x faster.</strong><br/>
-  Multi-threaded. Built-in vector search. GEO commands. BullMQ-compatible. Written in Rust. MIT licensed forever.
+  Multi-threaded. Built-in vector search, time series, and GEO. BullMQ-compatible. Written in Rust. MIT licensed forever.
 </p>
 
 <p align="center">
@@ -70,7 +70,8 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **190+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, HyperLogLog, bitops, pub/sub, transactions
+- **200+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, time series, HyperLogLog, bitops, pub/sub, transactions
+- **Native time series** -- TSADD, TSGET, TSRANGE, TSMRANGE with aggregation (avg, sum, min, max, count, std), retention policies, and label-based filtering. No modules, no sidecars. TSGET 4x faster than Redis GET
 - **Native vector search** -- VSET, VGET, VSEARCH with cosine similarity and metadata filtering. No extensions, no sidecars
 - **GEO commands** -- GEOADD, GEOSEARCH, GEODIST, GEOPOS, GEOHASH, GEORADIUS with up to 10x faster spatial queries
 - **LRU eviction** -- maxmemory with allkeys-lru, volatile-lru, allkeys-random, volatile-random policies
@@ -84,7 +85,7 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 - **Pipeline batching** -- consecutive same-shard commands batched under a single lock
 - **Persistence** -- automatic snapshots, configurable interval
 - **Auth** -- password authentication via `LUX_PASSWORD`
-- **Pub/Sub** -- SUBSCRIBE, UNSUBSCRIBE, PUBLISH
+- **Pub/Sub** -- SUBSCRIBE, PSUBSCRIBE, UNSUBSCRIBE, PUNSUBSCRIBE, PUBLISH
 - **TTL support** -- EX, PX, EXPIRE, PEXPIRE, PERSIST, TTL, PTTL
 - **MIT licensed** -- no license rug-pulls, unlike Redis (RSALv2/SSPL)
 
@@ -139,6 +140,31 @@ redis-cli VCARD
 ```
 
 Sub-millisecond search at 10,000 vectors with HNSW indexing. Built for AI agent memory, RAG, and semantic search.
+
+### Time Series
+
+Built-in time series with retention policies, label-based filtering, and aggregation. No modules required.
+
+```bash
+# Add samples with labels
+redis-cli TSADD cpu:host1 '*' 72.5 RETENTION 86400000 LABELS host server1 metric cpu
+redis-cli TSADD cpu:host1 '*' 75.0
+redis-cli TSADD cpu:host1 '*' 68.2
+
+# Get latest sample
+redis-cli TSGET cpu:host1
+
+# Query range with aggregation (1-hour average)
+redis-cli TSRANGE cpu:host1 - + AGGREGATION avg 3600000
+
+# Query across all series matching labels
+redis-cli TSMRANGE - + FILTER host=server1
+
+# Batch insert across multiple series
+redis-cli TSMADD cpu:host1 '*' 72.5 mem:host1 '*' 45.0 disk:host1 '*' 82.1
+```
+
+TSGET runs at 18M ops/sec at high pipeline. Supports avg, sum, min, max, count, first, last, range, std.p, std.s, var.p, var.s aggregation functions.
 
 ### SDK
 
@@ -214,7 +240,7 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 308 tests across unit and integration suites.
+Lux has 326 tests across unit and integration suites.
 
 ```bash
 cargo test
@@ -238,6 +264,7 @@ cargo test
 | **Integration: vectors** | 10 | VSET, VGET, VSEARCH, VCARD, metadata filtering, TTL, dimension validation |
 | **Integration: geo** | 14 | GEOADD, GEODIST, GEOPOS, GEOHASH, GEOSEARCH, GEOSEARCHSTORE, GEORADIUS, edge cases |
 | **Integration: hll** | 9 | PFADD, PFCOUNT, PFMERGE, cardinality accuracy, multi-key count, merge, WRONGTYPE |
+| **Integration: timeseries** | 18 | TSADD, TSGET, TSRANGE, TSMRANGE, TSMADD, TSINFO, aggregation, retention, labels, filtering |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -277,13 +304,17 @@ Release and Docker builds only proceed after tests pass.
 
 **HyperLogLog:** `PFADD` `PFCOUNT` `PFMERGE`
 
-**Pub/Sub:** `PUBLISH` `SUBSCRIBE` `UNSUBSCRIBE`
+**Time Series:** `TSADD` `TSMADD` `TSGET` `TSRANGE` `TSMRANGE` `TSINFO`
+
+**Pub/Sub:** `PUBLISH` `SUBSCRIBE` `PSUBSCRIBE` `UNSUBSCRIBE` `PUNSUBSCRIBE`
 
 **Transactions:** `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
 
 **Vectors:** `VSET` `VGET` `VSEARCH` `VCARD`
 
 **Scripting:** `EVAL` `EVALSHA` `SCRIPT LOAD` `SCRIPT EXISTS` `SCRIPT FLUSH`
+
+**Sorting:** `SORT` `SORT_RO`
 
 **Server:** `PING` `ECHO` `QUIT` `HELLO` `INFO` `TIME` `SAVE` `BGSAVE` `LASTSAVE` `AUTH` `CONFIG` `CLIENT` `SELECT` `COMMAND` `OBJECT` `MEMORY`
 

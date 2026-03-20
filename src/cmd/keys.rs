@@ -388,6 +388,7 @@ pub fn cmd_object(args: &[&[u8]], store: &Store, out: &mut BytesMut, now: Instan
                     StoreValue::Stream(_) => "stream",
                     StoreValue::Vector(_) => "raw",
                     StoreValue::HyperLogLog(..) => "raw",
+                    StoreValue::TimeSeries(_) => "timeseries",
                 };
                 resp::write_bulk(out, enc);
             }
@@ -435,6 +436,7 @@ pub fn cmd_memory(args: &[&[u8]], store: &Store, out: &mut BytesMut, now: Instan
                             16 + (v.data.len() * 4) + v.metadata.as_ref().map_or(0, |m| m.len())
                         }
                         StoreValue::HyperLogLog(regs, _) => regs.len(),
+                        StoreValue::TimeSeries(ts) => ts.samples.len() * 16,
                     };
                 resp::write_integer(out, size as i64);
             }

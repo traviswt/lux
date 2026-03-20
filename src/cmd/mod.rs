@@ -12,6 +12,7 @@ mod sort;
 mod sorted_sets;
 mod streams;
 mod strings;
+mod timeseries;
 mod vectors;
 
 use bytes::{Bytes, BytesMut};
@@ -607,6 +608,24 @@ pub fn execute(
             }
             if cmd_eq(cmd, b"TIME") {
                 return server::cmd_time(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSADD") {
+                return timeseries::cmd_tsadd(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSMADD") {
+                return timeseries::cmd_tsmadd(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSGET") {
+                return timeseries::cmd_tsget(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSRANGE") {
+                return timeseries::cmd_tsrange(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSMRANGE") {
+                return timeseries::cmd_tsmrange(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSINFO") {
+                return timeseries::cmd_tsinfo(args, store, out, now);
             }
         }
         b'U' => {
@@ -1672,6 +1691,12 @@ pub fn is_known_command(cmd: &[u8]) -> bool {
         || cmd_eq(cmd, b"PFDEBUG")
         || cmd_eq(cmd, b"SORT")
         || cmd_eq(cmd, b"SORT_RO")
+        || cmd_eq(cmd, b"TSADD")
+        || cmd_eq(cmd, b"TSMADD")
+        || cmd_eq(cmd, b"TSGET")
+        || cmd_eq(cmd, b"TSRANGE")
+        || cmd_eq(cmd, b"TSMRANGE")
+        || cmd_eq(cmd, b"TSINFO")
         || cmd_eq(cmd, b"SETBIT")
         || cmd_eq(cmd, b"GETBIT")
         || cmd_eq(cmd, b"BITCOUNT")

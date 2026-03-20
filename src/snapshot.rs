@@ -95,6 +95,7 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
             DumpValue::Stream(..) => b'X',
             DumpValue::Vector(..) => b'V',
             DumpValue::HyperLogLog(..) => b'P',
+            DumpValue::TimeSeries(..) => b'I',
         };
         w.write_all(&[type_byte])?;
         write_bytes(w, entry.key.as_bytes())?;
@@ -161,6 +162,19 @@ fn save_binary(w: &mut impl Write, entries: &[crate::store::DumpEntry]) -> io::R
             DumpValue::HyperLogLog(regs, _) => {
                 write_u32(w, regs.len() as u32)?;
                 w.write_all(regs)?;
+            }
+            DumpValue::TimeSeries(samples, retention, labels) => {
+                write_u32(w, samples.len() as u32)?;
+                for (ts, val) in samples {
+                    write_i64(w, *ts)?;
+                    write_f64(w, *val)?;
+                }
+                write_i64(w, *retention as i64)?;
+                write_u32(w, labels.len() as u32)?;
+                for (k, v) in labels {
+                    write_bytes(w, k.as_bytes())?;
+                    write_bytes(w, v.as_bytes())?;
+                }
             }
         }
     }
@@ -284,6 +298,24 @@ fn load_binary(store: &Store, r: &mut impl Read) -> io::Result<usize> {
                 r.read_exact(&mut regs)?;
                 let cached = crate::hll::hll_count(&regs);
                 DumpValue::HyperLogLog(regs, cached)
+            }
+            b'I' => {
+                let sample_count = read_u32(r)? as usize;
+                let mut samples = Vec::with_capacity(sample_count);
+                for _ in 0..sample_count {
+                    let ts = read_i64(r)?;
+                    let val = read_f64(r)?;
+                    samples.push((ts, val));
+                }
+                let retention = read_i64(r)? as u64;
+                let label_count = read_u32(r)? as usize;
+                let mut labels = Vec::with_capacity(label_count);
+                for _ in 0..label_count {
+                    let k = read_string(r)?;
+                    let v = read_string(r)?;
+                    labels.push((k, v));
+                }
+                DumpValue::TimeSeries(samples, retention, labels)
             }
             _ => {
                 return Err(io::Error::new(
@@ -494,7 +526,9 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
             DumpValue::Set(_) => 'T',
             DumpValue::SortedSet(_) => 'Z',
             DumpValue::Stream(..) => 'X',
-            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) => continue,
+            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) | DumpValue::TimeSeries(..) => {
+                continue
+            }
         };
         let encoded_value = match &entry.value {
             DumpValue::Str(s) => String::from_utf8_lossy(s).into_owned(),
@@ -527,7 +561,9 @@ fn save_legacy_to_path(store: &Store, path: &str) -> io::Result<usize> {
                     .collect();
                 format!("{}\x1c{}", last_id, entries_str.join("\x1f"))
             }
-            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) => unreachable!(),
+            DumpValue::Vector(..) | DumpValue::HyperLogLog(..) | DumpValue::TimeSeries(..) => {
+                unreachable!()
+            }
         };
         writeln!(
             file,

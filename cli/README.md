@@ -4,12 +4,17 @@ CLI for [Lux Cloud](https://luxdb.dev). Manage projects, run commands, stream lo
 
 ## Install
 
+One-line install:
+```bash
+curl -fsSL https://raw.githubusercontent.com/lux-db/lux/main/cli/install.sh | sh
+```
+
 From source (requires Rust):
 ```bash
 cargo install --git https://github.com/lux-db/lux --path cli
 ```
 
-From GitHub Releases (prebuilt binaries):
+From GitHub Releases (manual download):
 ```bash
 # macOS (Apple Silicon)
 curl -fsSL https://github.com/lux-db/lux/releases/latest/download/luxctl-macos-arm64.tar.gz | tar xz

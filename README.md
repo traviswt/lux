@@ -197,6 +197,27 @@ Events are `["kmessage", pattern, key, operation]`. Operations are lowercase com
 
 Built for reactive applications, cache invalidation, live dashboards, and any use case where you need to react to data changes without polling.
 
+### CLI
+
+```bash
+cargo install --git https://github.com/lux-db/lux --path cli
+```
+
+```bash
+luxctl login                              # authenticate with a lux_ token
+luxctl projects                           # list projects
+luxctl create my-app --accept-charges     # create a new project
+luxctl status my-app                      # show status and metrics
+luxctl exec my-app SET hello world        # run a command
+luxctl logs my-app                        # fetch logs
+luxctl restart my-app                     # restart instance
+luxctl connect my-app                     # interactive REPL via cloud
+luxctl connect lux://localhost:6379       # connect to local instance
+luxctl destroy my-app --accept-consequences  # delete project
+```
+
+See [cli/README.md](cli/README.md) for full installation and usage docs.
+
 ### SDK
 
 ```bash

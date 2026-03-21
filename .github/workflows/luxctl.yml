@@ -1,0 +1,72 @@
+name: luxctl Release
+
+on:
+  push:
+    tags:
+      - 'luxctl-v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: luxctl-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: luxctl-linux-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: luxctl-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: luxctl-macos-x86_64
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - run: cd cli && cargo build --release --target ${{ matrix.target }}
+
+      - run: |
+          cp cli/target/${{ matrix.target }}/release/luxctl ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - run: |
+          cd artifacts
+          for f in luxctl-*; do
+            tar czf "${f}.tar.gz" "$f"
+            sha256sum "${f}.tar.gz" >> checksums.txt
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt
+          generate_release_notes: true

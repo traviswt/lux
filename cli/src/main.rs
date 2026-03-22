@@ -74,6 +74,10 @@ enum Commands {
         #[arg(short = 'a', long, help = "Password (for direct connection)")]
         password: Option<String>,
     },
+    Update {
+        #[arg(long, help = "Check for updates without installing")]
+        check: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -725,6 +729,153 @@ async fn main() {
                     println!("{response}");
                 }
             }
+        }
+
+        Commands::Update { check } => {
+            let current = env!("CARGO_PKG_VERSION");
+            println!("{} v{current}", "Current version:".bold());
+            println!("{}", "Checking for updates...".dimmed());
+
+            let client = reqwest::Client::builder()
+                .user_agent("luxctl")
+                .build()
+                .unwrap();
+
+            let res = client
+                .get("https://api.github.com/repos/lux-db/lux/releases")
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{} {e}", "Failed to check for updates:".red());
+                    std::process::exit(1);
+                });
+
+            let releases: Vec<serde_json::Value> = res.json().await.unwrap_or_default();
+            let latest_tag = releases
+                .iter()
+                .filter_map(|r| r.get("tag_name")?.as_str())
+                .find(|t| t.starts_with("luxctl-v"));
+
+            let latest_version = match latest_tag {
+                Some(tag) => tag.trim_start_matches("luxctl-v"),
+                None => {
+                    eprintln!("{}", "No luxctl releases found.".yellow());
+                    std::process::exit(1);
+                }
+            };
+
+            if latest_version == current {
+                println!("{}", "Already up to date.".green());
+                return;
+            }
+
+            println!(
+                "{} v{current} -> v{latest_version}",
+                "Update available:".yellow()
+            );
+
+            if check {
+                println!("Run {} to install.", "luxctl update".cyan());
+                return;
+            }
+
+            let os = if cfg!(target_os = "macos") {
+                "macos"
+            } else if cfg!(target_os = "linux") {
+                "linux"
+            } else {
+                eprintln!("{}", "Unsupported OS for self-update.".red());
+                std::process::exit(1);
+            };
+
+            let arch = if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else if cfg!(target_arch = "x86_64") {
+                "x86_64"
+            } else {
+                eprintln!("{}", "Unsupported architecture for self-update.".red());
+                std::process::exit(1);
+            };
+
+            let artifact = format!("luxctl-{os}-{arch}");
+            let download_url = format!(
+                "https://github.com/lux-db/lux/releases/download/{}/{artifact}.tar.gz",
+                latest_tag.unwrap()
+            );
+
+            println!("{} Downloading v{latest_version}...", "...".dimmed());
+
+            let tar_bytes = client
+                .get(&download_url)
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{} {e}", "Download failed:".red());
+                    std::process::exit(1);
+                })
+                .bytes()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{} {e}", "Download failed:".red());
+                    std::process::exit(1);
+                });
+
+            let current_exe = std::env::current_exe().unwrap_or_else(|e| {
+                eprintln!("{} {e}", "Could not determine binary path:".red());
+                std::process::exit(1);
+            });
+
+            let tmp_dir = std::env::temp_dir().join("luxctl-update");
+            std::fs::create_dir_all(&tmp_dir).ok();
+            let tar_path = tmp_dir.join("luxctl.tar.gz");
+            std::fs::write(&tar_path, &tar_bytes).unwrap_or_else(|e| {
+                eprintln!("{} {e}", "Failed to write temp file:".red());
+                std::process::exit(1);
+            });
+
+            let status = std::process::Command::new("tar")
+                .args([
+                    "xzf",
+                    tar_path.to_str().unwrap(),
+                    "-C",
+                    tmp_dir.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap_or_else(|e| {
+                    eprintln!("{} {e}", "Failed to extract:".red());
+                    std::process::exit(1);
+                });
+
+            if !status.success() {
+                eprintln!("{}", "Failed to extract update.".red());
+                std::process::exit(1);
+            }
+
+            let new_binary = tmp_dir.join(&artifact);
+            if !new_binary.exists() {
+                eprintln!("{} Binary not found in archive.", "Error:".red());
+                std::process::exit(1);
+            }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&new_binary, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+
+            std::fs::rename(&new_binary, &current_exe).unwrap_or_else(|_| {
+                let copy_result = std::fs::copy(&new_binary, &current_exe);
+                if copy_result.is_err() {
+                    eprintln!(
+                        "{} Could not replace binary. Try: sudo luxctl update",
+                        "Permission denied:".red()
+                    );
+                    std::process::exit(1);
+                }
+            });
+
+            std::fs::remove_dir_all(&tmp_dir).ok();
+            println!("{} Updated to v{latest_version}", "Done.".green());
         }
     }
 }

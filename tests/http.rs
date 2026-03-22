@@ -108,7 +108,11 @@ fn http_request(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let body = resp.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string();
+    let body = resp
+        .split_once("\r\n\r\n")
+        .map(|x| x.1)
+        .unwrap_or("")
+        .to_string();
     (status, body)
 }
 

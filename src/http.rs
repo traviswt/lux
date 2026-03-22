@@ -26,12 +26,7 @@ pub async fn start_http_server(
         let broker = broker.clone();
 
         tokio::spawn(async move {
-            loop {
-                match handle_request(&mut socket, &store, &broker).await {
-                    Ok(true) => continue,
-                    _ => break,
-                }
-            }
+            while let Ok(true) = handle_request(&mut socket, &store, &broker).await {}
         });
     }
 }
@@ -80,13 +75,12 @@ async fn handle_request(
     let (method, full_path, headers, body) = parse_http_request(&request);
 
     if method == "OPTIONS" {
-        let response = format!(
-            "HTTP/1.1 204 No Content\r\n\
+        let response = "HTTP/1.1 204 No Content\r\n\
              Access-Control-Allow-Origin: *\r\n\
              Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
              Access-Control-Allow-Headers: Authorization, Content-Type\r\n\
              Content-Length: 0\r\n\r\n"
-        );
+            .to_string();
         socket.write_all(response.as_bytes()).await?;
         return Ok(true);
     }

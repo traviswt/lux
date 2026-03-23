@@ -310,6 +310,10 @@ impl DiskShard {
         self.index.len()
     }
 
+    pub fn total_size(&self) -> usize {
+        self.total_bytes
+    }
+
     /// Check if compaction would be worthwhile. Triggers when >30% of the
     /// data file is dead bytes (overwritten/deleted entries), or when dead
     /// bytes exceed 100MB absolute.

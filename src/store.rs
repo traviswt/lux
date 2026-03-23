@@ -469,6 +469,13 @@ impl Store {
         }
     }
 
+    pub fn disk_usage_bytes(&self) -> usize {
+        match &self.disk_shards {
+            Some(ds) => ds.iter().map(|d| d.lock().total_size()).sum(),
+            None => 0,
+        }
+    }
+
     pub fn compact_disk_shards(&self) {
         if let Some(ref ds) = self.disk_shards {
             for (i, d) in ds.iter().enumerate() {

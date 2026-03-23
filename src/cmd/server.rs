@@ -232,6 +232,11 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
          # Memory\r\n\
          used_memory_bytes:{}\r\n\
          \r\n\
+         # Storage\r\n\
+         storage_mode:{}\r\n\
+         used_disk_bytes:{}\r\n\
+         disk_keys:{}\r\n\
+         \r\n\
          # Keyspace\r\n\
          db0:keys={},expires=0,avg_ttl=0\r\n\
          keys:{}\r\n\
@@ -242,6 +247,13 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
         CONNECTED_CLIENTS.load(Ordering::Relaxed),
         TOTAL_COMMANDS.load(Ordering::Relaxed),
         store.approximate_memory(),
+        if crate::disk::storage_config().mode == crate::disk::StorageMode::Tiered {
+            "tiered"
+        } else {
+            "memory"
+        },
+        store.disk_usage_bytes(),
+        store.disk_key_count(),
         store.dbsize(now),
         store.dbsize(now),
         store.vcard(now)

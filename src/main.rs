@@ -1,4 +1,5 @@
 mod cmd;
+mod disk;
 mod eviction;
 mod geo;
 mod hll;
@@ -41,16 +42,26 @@ async fn main() -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).await?;
     let store = Arc::new(Store::new());
+    if disk::storage_config().mode == disk::StorageMode::Tiered {
+        println!("storage: tiered mode (dir: {})", disk::storage_config().dir);
+    }
     let broker = Broker::new();
     let script_engine = Arc::new(lua::ScriptEngine::new());
 
     let require_auth = std::env::var("LUX_PASSWORD").is_ok_and(|p| !p.is_empty());
 
+    store
+        .wal_suppress
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     match snapshot::load(&store) {
         Ok(0) => println!("no snapshot found"),
         Ok(n) => println!("loaded {n} keys from snapshot"),
         Err(e) => eprintln!("snapshot load error: {e}"),
     }
+    store
+        .wal_suppress
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    store.replay_wal(&broker);
 
     tokio::spawn(snapshot::background_save_loop(store.clone()));
     tokio::spawn(broker.clone().run_key_event_loop());
@@ -67,6 +78,27 @@ async fn main() -> std::io::Result<()> {
                 store.expire_sweep(now);
             }
         });
+    }
+
+    if disk::storage_config().mode == disk::StorageMode::Tiered {
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    store.fsync_wal();
+                }
+            });
+        }
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    store.compact_disk_shards();
+                }
+            });
+        }
     }
 
     {
@@ -219,7 +251,7 @@ async fn handle_tx_cmd(
                     let refs: Vec<&[u8]> = owned_args.iter().map(|v| v.as_slice()).collect();
                     let cmd_result = {
                         let _guard = SCRIPT_GATE.read();
-                        cmd::execute(store, broker, &refs, write_buf, now)
+                        cmd::execute_with_wal(store, broker, &refs, write_buf, now)
                     };
                     match cmd_result {
                         CmdResult::Written => {}
@@ -623,7 +655,7 @@ async fn handle_connection(
 
                     let cmd_result = {
                         let _guard = SCRIPT_GATE.read();
-                        cmd::execute(&store, &broker, args, &mut write_buf, now)
+                        cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now)
                     };
                     match cmd_result {
                         CmdResult::Written => {
@@ -814,7 +846,7 @@ async fn handle_connection(
 
                         let cmd_result = {
                             let _guard = SCRIPT_GATE.read();
-                            cmd::execute(&store, &broker, args, &mut write_buf, now)
+                            cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now)
                         };
                         match cmd_result {
                             CmdResult::Written => {
@@ -987,6 +1019,15 @@ async fn handle_connection(
                         if all_classified {
                             let has_writes = batch_flags.contains(&FL_WRITE);
                             if has_writes {
+                                for args in &commands[i..batch_end] {
+                                    if args.len() > 1 {
+                                        store.try_promote(args[1], now);
+                                    }
+                                    if args.len() > 1 && crate::eviction::is_write_command(args[0])
+                                    {
+                                        store.wal_log_command(args);
+                                    }
+                                }
                                 {
                                     let mut shard = store.lock_write_shard(shard_idx as usize);
                                     shard.version += 1;
@@ -1022,7 +1063,7 @@ async fn handle_connection(
                             }
                         } else {
                             for args in &commands[i..batch_end] {
-                                cmd::execute(&store, &broker, args, &mut write_buf, now);
+                                cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now);
                                 fire_key_events(&broker, args);
                             }
                         }

@@ -179,6 +179,9 @@ pub(crate) struct Shard {
 pub struct Store {
     shards: Box<[RwLock<Shard>]>,
     pub(crate) vector_index: RwLock<crate::hnsw::HnswIndex>,
+    disk_shards: Option<Box<[parking_lot::Mutex<crate::disk::DiskShard>]>>,
+    wal_shards: Option<Box<[parking_lot::Mutex<crate::disk::Wal>]>>,
+    pub(crate) wal_suppress: std::sync::atomic::AtomicBool,
 }
 
 #[inline(always)]
@@ -246,9 +249,38 @@ impl Store {
                 })
             })
             .collect();
+
+        let config = crate::disk::storage_config();
+        let disk_shard_count = n.min(64);
+        let (disk_shards, wal_shards) = if config.mode == crate::disk::StorageMode::Tiered {
+            let dir = std::path::Path::new(&config.dir);
+            let ds: Vec<parking_lot::Mutex<crate::disk::DiskShard>> = (0..disk_shard_count)
+                .map(|i| {
+                    parking_lot::Mutex::new(
+                        crate::disk::DiskShard::open(dir, i)
+                            .unwrap_or_else(|e| panic!("failed to open disk shard {i}: {e}")),
+                    )
+                })
+                .collect();
+            let ws: Vec<parking_lot::Mutex<crate::disk::Wal>> = (0..disk_shard_count)
+                .map(|i| {
+                    parking_lot::Mutex::new(
+                        crate::disk::Wal::open(dir, i)
+                            .unwrap_or_else(|e| panic!("failed to open WAL {i}: {e}")),
+                    )
+                })
+                .collect();
+            (Some(ds.into_boxed_slice()), Some(ws.into_boxed_slice()))
+        } else {
+            (None, None)
+        };
+
         Self {
             shards: shards.into_boxed_slice(),
             vector_index: RwLock::new(crate::hnsw::HnswIndex::new(0)),
+            disk_shards,
+            wal_shards,
+            wal_suppress: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -257,8 +289,18 @@ impl Store {
     }
 
     #[inline(always)]
-    fn shard_index(&self, key: &[u8]) -> usize {
+    pub(crate) fn shard_index(&self, key: &[u8]) -> usize {
         (fx_hash(key) % self.shards.len() as u64) as usize
+    }
+
+    /// Map a key to its disk shard. Disk shards are capped at 64 (fewer than
+    /// memory shards) to limit open file descriptors.
+    #[inline(always)]
+    fn disk_shard_index(&self, key: &[u8]) -> usize {
+        match &self.disk_shards {
+            Some(ds) => (fx_hash(key) % ds.len() as u64) as usize,
+            None => 0,
+        }
     }
 
     pub fn shard_for_key(&self, key: &[u8]) -> usize {
@@ -277,13 +319,280 @@ impl Store {
         self.shards[idx].write()
     }
 
+    /// Evict a key from memory. In tiered mode, the entry is serialized to
+    /// the disk shard BEFORE being removed from memory. If the disk write
+    /// fails, the entry stays in memory (no silent data loss). The shard
+    /// write lock is dropped before disk I/O to avoid blocking other operations.
     pub fn evict_key(&self, shard_idx: usize, key: &str) {
-        let mut shard = self.shards[shard_idx].write();
-        if let Some(entry) = shard.data.remove(key) {
-            let mem = estimate_entry_memory(key, &entry.value);
-            shard.used_memory = shard.used_memory.saturating_sub(mem);
-            USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
-            shard.version += 1;
+        if let Some(ref disk_shards) = self.disk_shards {
+            let mut shard = self.shards[shard_idx].write();
+            if let Some(entry) = shard.data.get(key) {
+                if matches!(entry.value, StoreValue::Vector(_)) {
+                    let mem = estimate_entry_memory(key, &entry.value);
+                    shard.data.remove(key);
+                    shard.used_memory = shard.used_memory.saturating_sub(mem);
+                    USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
+                    shard.version += 1;
+                    return;
+                }
+                let now = Instant::now();
+                let ttl_ms = entry
+                    .expires_at
+                    .map(|exp| {
+                        if exp > now {
+                            exp.duration_since(now).as_millis() as i64
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                let dump = self.entry_to_dump(key, &entry.value, ttl_ms);
+                drop(shard);
+
+                let disk_idx = (fx_hash(key.as_bytes()) % disk_shards.len() as u64) as usize;
+                let mut disk = disk_shards[disk_idx].lock();
+                if let Err(e) = disk.put(key, &dump) {
+                    eprintln!("CRITICAL: disk write failed, keeping entry in memory: {e}");
+                    return;
+                }
+                if disk.should_compact() {
+                    if let Err(e) = disk.compact() {
+                        eprintln!("inline compaction error: {e}");
+                    }
+                }
+                drop(disk);
+
+                let mut shard = self.shards[shard_idx].write();
+                if let Some(entry) = shard.data.remove(key) {
+                    let mem = estimate_entry_memory(key, &entry.value);
+                    shard.used_memory = shard.used_memory.saturating_sub(mem);
+                    USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
+                    shard.version += 1;
+                }
+            }
+        } else {
+            let mut shard = self.shards[shard_idx].write();
+            if let Some(entry) = shard.data.remove(key) {
+                let mem = estimate_entry_memory(key, &entry.value);
+                shard.used_memory = shard.used_memory.saturating_sub(mem);
+                USED_MEMORY.fetch_sub(mem, std::sync::atomic::Ordering::Relaxed);
+                shard.version += 1;
+            }
+        }
+    }
+
+    fn entry_to_dump(&self, key: &str, value: &StoreValue, ttl_ms: i64) -> DumpEntry {
+        let dump_value = match value {
+            StoreValue::Str(s) => DumpValue::Str(s.to_vec()),
+            StoreValue::List(l) => DumpValue::List(l.iter().map(|b| b.to_vec()).collect()),
+            StoreValue::Hash(h) => {
+                DumpValue::Hash(h.iter().map(|(k, v)| (k.clone(), v.to_vec())).collect())
+            }
+            StoreValue::Set(s) => DumpValue::Set(s.iter().cloned().collect()),
+            StoreValue::SortedSet(_, scores) => {
+                DumpValue::SortedSet(scores.iter().map(|(m, s)| (m.clone(), *s)).collect())
+            }
+            StoreValue::Stream(s) => {
+                let entries = s
+                    .entries
+                    .iter()
+                    .map(|(id, fields)| {
+                        let flds = fields
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_vec()))
+                            .collect();
+                        (id.to_string(), flds)
+                    })
+                    .collect();
+                DumpValue::Stream(entries, s.last_id.to_string())
+            }
+            StoreValue::Vector(v) => DumpValue::Vector(v.data.clone(), v.metadata.clone()),
+            StoreValue::HyperLogLog(regs, cached) => DumpValue::HyperLogLog(regs.clone(), *cached),
+            StoreValue::TimeSeries(ts) => {
+                DumpValue::TimeSeries(ts.samples.clone(), ts.retention, ts.labels.clone())
+            }
+        };
+        DumpEntry {
+            key: key.to_string(),
+            value: dump_value,
+            ttl_ms,
+        }
+    }
+
+    /// Promote a cold key from disk back to memory. Called before every
+    /// command (reads AND writes) to ensure the entry is hot before operating
+    /// on it. Returns true if the key was found on disk and promoted.
+    /// For writes like HSET/LPUSH, this preserves existing data that would
+    /// otherwise be lost if the command created a new empty entry.
+    pub fn try_promote(&self, key: &[u8], now: Instant) -> bool {
+        let disk_shards = match &self.disk_shards {
+            Some(ds) => ds,
+            None => return false,
+        };
+        let didx = self.disk_shard_index(key);
+        let key_string = std::str::from_utf8(key).unwrap_or_default();
+
+        let mut disk = disk_shards[didx].lock();
+        if !disk.contains(key_string) {
+            return false;
+        }
+
+        let result = match disk.get(key_string, now) {
+            Ok(Some((value, ttl))) => Some((value, ttl)),
+            _ => None,
+        };
+        disk.remove(key_string);
+        drop(disk);
+
+        if let Some((value, ttl)) = result {
+            self.load_entry(key_string.to_string(), value, ttl);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn disk_contains(&self, key: &[u8]) -> bool {
+        if let Some(ref ds) = self.disk_shards {
+            let didx = self.disk_shard_index(key);
+            let ks = std::str::from_utf8(key).unwrap_or_default();
+            ds[didx].lock().contains_valid(ks, Instant::now())
+        } else {
+            false
+        }
+    }
+
+    pub fn disk_key_count(&self) -> usize {
+        match &self.disk_shards {
+            Some(ds) => ds.iter().map(|d| d.lock().len()).sum(),
+            None => 0,
+        }
+    }
+
+    pub fn disk_keys(&self, _now: Instant) -> Vec<String> {
+        match &self.disk_shards {
+            Some(ds) => {
+                let mut keys = Vec::new();
+                for d in ds.iter() {
+                    let disk = d.lock();
+                    keys.extend(disk.keys().cloned());
+                }
+                keys
+            }
+            None => Vec::new(),
+        }
+    }
+
+    pub fn compact_disk_shards(&self) {
+        if let Some(ref ds) = self.disk_shards {
+            for (i, d) in ds.iter().enumerate() {
+                let mut disk = d.lock();
+                if disk.should_compact() {
+                    if let Err(e) = disk.compact() {
+                        eprintln!("compaction error (shard {i}): {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Append a command to the per-shard WAL. Uses the key (args[1]) to
+    /// determine which shard's WAL to write to. Suppressed during WAL replay
+    /// and snapshot loading to prevent re-logging replayed commands.
+    pub fn wal_log_command(&self, args: &[&[u8]]) {
+        if self.wal_suppress.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        if args.len() < 2 {
+            return;
+        }
+        if let Some(ref ws) = self.wal_shards {
+            let idx = self.disk_shard_index(args[1]);
+            let mut wal = ws[idx].lock();
+            if let Err(e) = wal.append_command(args) {
+                eprintln!("WAL write error: {e}");
+            }
+        }
+    }
+
+    /// Replay WAL entries by re-executing each command through the normal
+    /// command dispatch. Called on startup after snapshot load to recover
+    /// writes that happened between the last snapshot and the crash.
+    /// WAL logging is suppressed during replay to avoid re-logging.
+    pub fn replay_wal(&self, broker: &crate::pubsub::Broker) {
+        let ws = match &self.wal_shards {
+            Some(ws) => ws,
+            None => return,
+        };
+        self.wal_suppress
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut total = 0usize;
+        for (i, w) in ws.iter().enumerate() {
+            let mut wal = w.lock();
+            match wal.replay() {
+                Ok(commands) => {
+                    for cmd_args in commands {
+                        let refs: Vec<&[u8]> = cmd_args.iter().map(|a| a.as_slice()).collect();
+                        let mut out = bytes::BytesMut::new();
+                        let now = Instant::now();
+                        crate::cmd::execute(self, broker, &refs, &mut out, now);
+                        total += 1;
+                    }
+                }
+                Err(e) => eprintln!("WAL replay error (shard {i}): {e}"),
+            }
+        }
+        if total > 0 {
+            println!("wal: replayed {total} commands");
+        }
+        self.wal_suppress
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn truncate_wal(&self) {
+        if let Some(ref ws) = self.wal_shards {
+            for w in ws.iter() {
+                let mut wal = w.lock();
+                if let Err(e) = wal.truncate() {
+                    eprintln!("WAL truncate error: {e}");
+                }
+            }
+        }
+    }
+
+    pub fn remove_from_disk(&self, key: &[u8]) {
+        if let Some(ref ds) = self.disk_shards {
+            let didx = self.disk_shard_index(key);
+            let ks = std::str::from_utf8(key).unwrap_or_default();
+            ds[didx].lock().remove(ks);
+        }
+    }
+
+    pub fn dump_disk_entries(&self, now: Instant) -> Vec<DumpEntry> {
+        match &self.disk_shards {
+            Some(ds) => {
+                let mut entries = Vec::new();
+                for d in ds.iter() {
+                    let mut disk = d.lock();
+                    if let Ok(mut de) = disk.dump_all(now) {
+                        entries.append(&mut de);
+                    }
+                }
+                entries
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Flush WAL data to disk. Called by a background task every 1 second
+    /// (matching Redis appendfsync everysec). Trades up to 1s of data loss
+    /// on power failure for significantly higher write throughput vs per-write fsync.
+    pub fn fsync_wal(&self) {
+        if let Some(ref ws) = self.wal_shards {
+            for w in ws.iter() {
+                let mut wal = w.lock();
+                wal.fsync().ok();
+            }
         }
     }
 
@@ -377,7 +686,17 @@ impl Store {
     pub fn get(&self, key: &[u8], now: Instant) -> Option<Bytes> {
         let idx = self.shard_index(key);
         let shard = self.shards[idx].read();
-        Self::get_from_shard(&shard.data, key, now)
+        let result = Self::get_from_shard(&shard.data, key, now);
+        if result.is_some() {
+            return result;
+        }
+        drop(shard);
+        if self.try_promote(key, now) {
+            let shard = self.shards[idx].read();
+            Self::get_from_shard(&shard.data, key, now)
+        } else {
+            None
+        }
     }
 
     pub fn get_entry_type(&self, key: &[u8], now: Instant) -> Option<&'static str> {
@@ -385,7 +704,15 @@ impl Store {
         let shard = self.shards[idx].read();
         match shard.data.get(key_str(key)) {
             Some(entry) if !entry.is_expired_at(now) => Some(entry.value.type_name()),
-            _ => None,
+            _ => {
+                drop(shard);
+                if self.try_promote(key, now) {
+                    let shard = self.shards[idx].read();
+                    shard.data.get(key_str(key)).map(|e| e.value.type_name())
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -420,6 +747,7 @@ impl Store {
         let mut shard = self.shards[idx].write();
         shard.version += 1;
         Self::set_on_shard(&mut shard.data, key, value, ttl, now);
+        self.remove_from_disk(key);
     }
 
     pub fn set_nx(&self, key: &[u8], value: &[u8], now: Instant) -> bool {
@@ -525,6 +853,12 @@ impl Store {
                 if !expired {
                     count += 1;
                 }
+            } else {
+                drop(shard);
+                if self.disk_contains(key) {
+                    self.remove_from_disk(key);
+                    count += 1;
+                }
             }
         }
         if !vector_keys_removed.is_empty() {
@@ -544,7 +878,12 @@ impl Store {
             if let Some(entry) = shard.data.get(key_str(key)) {
                 if !entry.is_expired_at(now) {
                     count += 1;
+                    continue;
                 }
+            }
+            drop(shard);
+            if self.disk_contains(key) {
+                count += 1;
             }
         }
         count
@@ -648,6 +987,16 @@ impl Store {
             for (k, e) in shard.data.iter() {
                 if e.expires_at.is_none_or(|exp| now < exp) && matcher.matches(k) {
                     result.push(k.clone());
+                }
+            }
+        }
+        if let Some(ref ds) = self.disk_shards {
+            for d in ds.iter() {
+                let disk = d.lock();
+                for k in disk.keys() {
+                    if matcher.matches(k) && !result.contains(k) {
+                        result.push(k.clone());
+                    }
                 }
             }
         }
@@ -852,6 +1201,7 @@ impl Store {
                 .filter(|e| e.expires_at.is_none_or(|exp| now < exp))
                 .count() as i64;
         }
+        total += self.disk_key_count() as i64;
         total
     }
 
@@ -864,6 +1214,15 @@ impl Store {
             shard.used_memory = 0;
         }
         *self.vector_index.write() = crate::hnsw::HnswIndex::new(0);
+        if let Some(ref ds) = self.disk_shards {
+            for d in ds.iter() {
+                let mut disk = d.lock();
+                let keys: Vec<String> = disk.keys().cloned().collect();
+                for k in keys {
+                    disk.remove(&k);
+                }
+            }
+        }
     }
 
     pub fn lpush(&self, key: &[u8], values: &[&[u8]], now: Instant) -> Result<i64, String> {
@@ -2141,6 +2500,8 @@ impl Store {
                 });
             }
         }
+        let mut disk_entries = self.dump_disk_entries(now);
+        entries.append(&mut disk_entries);
         entries
     }
 

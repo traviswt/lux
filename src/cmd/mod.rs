@@ -138,6 +138,10 @@ pub fn execute(
         return CmdResult::Written;
     }
 
+    if args.len() > 1 {
+        store.try_promote(args[1], now);
+    }
+
     if crate::eviction::is_write_command(cmd) {
         if let Err(e) = crate::eviction::evict_if_needed(store) {
             resp::write_error(out, e);
@@ -835,6 +839,19 @@ pub fn execute(
 
     resp::write_error(out, &format!("ERR unknown command '{}'", arg_str(cmd)));
     CmdResult::Written
+}
+
+pub fn execute_with_wal(
+    store: &Store,
+    broker: &Broker,
+    args: &[&[u8]],
+    out: &mut BytesMut,
+    now: Instant,
+) -> CmdResult {
+    if args.len() > 1 && crate::eviction::is_write_command(args[0]) {
+        store.wal_log_command(args);
+    }
+    execute(store, broker, args, out, now)
 }
 
 pub type ShardData = hashbrown::HashMap<String, Entry, crate::store::FxBuildHasher>;

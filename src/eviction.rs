@@ -268,6 +268,19 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
         || eq(cmd, b"TDEL")
         || eq(cmd, b"TDROP")
         || eq(cmd, b"TALTER")
+        || eq(cmd, b"EVAL")
+        || eq(cmd, b"EVALSHA")
+        || eq(cmd, b"RPOPLPUSH")
+        || eq(cmd, b"LINSERT")
+        || eq(cmd, b"LPUSHX")
+        || eq(cmd, b"RPUSHX")
+        || eq(cmd, b"HMSET")
+        || eq(cmd, b"LTRIM")
+        || eq(cmd, b"ZRANGESTORE")
+        || eq(cmd, b"ZREMRANGEBYRANK")
+        || eq(cmd, b"ZREMRANGEBYSCORE")
+        || eq(cmd, b"ZREMRANGEBYLEX")
+        || eq(cmd, b"TSMADD")
 }
 
 #[cfg(test)]

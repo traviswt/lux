@@ -477,7 +477,10 @@ pub async fn background_save_loop(store: Arc<Store>) {
     loop {
         tokio::time::sleep(interval).await;
         match save(&store) {
-            Ok(n) => println!("snapshot: saved {n} keys"),
+            Ok(n) => {
+                println!("snapshot: saved {n} keys");
+                store.truncate_wal();
+            }
             Err(e) => eprintln!("snapshot error: {e} (path: {})", snapshot_path()),
         }
     }

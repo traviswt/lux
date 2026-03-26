@@ -152,7 +152,7 @@ pub fn haversine(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let lat1_r = lat1.to_radians();
     let lat2_r = lat2.to_radians();
     let u = ((lat2_r - lat1_r) / 2.0).sin();
-    let a = u * u + lat1_r.cos() * lat2_r.cos() * v * v;
+    let a = (u * u + lat1_r.cos() * lat2_r.cos() * v * v).min(1.0);
     2.0 * EARTH_RADIUS_M * a.sqrt().asin()
 }
 

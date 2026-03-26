@@ -4781,31 +4781,41 @@ impl GlobMatcher {
             return true;
         }
         let s: Vec<char> = s.chars().collect();
-        Self::do_match(&self.pattern, &s, 0, 0)
+        Self::do_match(&self.pattern, &s)
     }
 
-    fn do_match(pattern: &[char], s: &[char], pi: usize, si: usize) -> bool {
-        if pi == pattern.len() && si == s.len() {
-            return true;
-        }
-        if pi == pattern.len() {
-            return false;
-        }
-        if pattern[pi] == '*' {
-            for i in si..=s.len() {
-                if Self::do_match(pattern, s, pi + 1, i) {
-                    return true;
-                }
+    /// Iterative glob matching (linear time). Avoids the exponential
+    /// backtracking of the naive recursive approach where patterns like
+    /// `a*a*a*a*b` against long strings would cause CPU exhaustion.
+    fn do_match(pattern: &[char], s: &[char]) -> bool {
+        let mut pi = 0;
+        let mut si = 0;
+        let mut star_pi = usize::MAX; // pattern index of last '*'
+        let mut star_si = 0; // string index when last '*' was hit
+
+        while si < s.len() {
+            if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == s[si]) {
+                pi += 1;
+                si += 1;
+            } else if pi < pattern.len() && pattern[pi] == '*' {
+                star_pi = pi;
+                star_si = si;
+                pi += 1; // try matching '*' with empty string first
+            } else if star_pi != usize::MAX {
+                // Mismatch: backtrack to last '*' and consume one more char.
+                pi = star_pi + 1;
+                star_si += 1;
+                si = star_si;
+            } else {
+                return false;
             }
-            return false;
         }
-        if si == s.len() {
-            return false;
+
+        // Consume trailing '*'s in pattern.
+        while pi < pattern.len() && pattern[pi] == '*' {
+            pi += 1;
         }
-        if pattern[pi] == '?' || pattern[pi] == s[si] {
-            return Self::do_match(pattern, s, pi + 1, si + 1);
-        }
-        false
+        pi == pattern.len()
     }
 }
 #[cfg(test)]

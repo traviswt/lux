@@ -351,7 +351,12 @@ pub fn table_insert(
         validate_value(field, value)?;
 
         if let FieldType::Ref(ref ref_table) = field.field_type {
-            let ref_id: i64 = value.parse().unwrap();
+            let ref_id: i64 = value.parse().map_err(|_| {
+                format!(
+                    "ERR field '{}' expects int ref, got '{}'",
+                    field.name, value
+                )
+            })?;
             let rk = row_key(ref_table, ref_id);
             let ref_row = store.hgetall(rk.as_bytes(), now).unwrap_or_default();
             if ref_row.is_empty() {
@@ -478,7 +483,9 @@ pub fn table_update(
         validate_value(field, fval)?;
 
         if let FieldType::Ref(ref ref_table) = field.field_type {
-            let ref_id: i64 = fval.parse().unwrap();
+            let ref_id: i64 = fval
+                .parse()
+                .map_err(|_| format!("ERR field '{}' expects int ref, got '{}'", fname, fval))?;
             let rk2 = row_key(ref_table, ref_id);
             let ref_row = store.hgetall(rk2.as_bytes(), now).unwrap_or_default();
             if ref_row.is_empty() {

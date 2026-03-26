@@ -12,7 +12,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
       - run: cargo build --release
-      - run: sudo apt-get install -y redis-tools tcl
+      - run: sudo apt-get update && sudo apt-get install -y redis-tools tcl
       - run: git clone --depth 1 --branch 9.0.3 https://github.com/valkey-io/valkey.git /tmp/valkey
       - name: Integration test
         run: |

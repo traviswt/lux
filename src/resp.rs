@@ -173,6 +173,11 @@ impl<'a> Parser<'a> {
         if count < 0 {
             return Ok(None);
         }
+        // Cap array size to prevent OOM from malicious clients.
+        // 1M args is far beyond any legitimate command.
+        if count > 1_048_576 {
+            return Err("ERR RESP array count exceeds maximum");
+        }
         let mut args = Vec::with_capacity(count as usize);
         for _ in 0..count {
             match self.parse_bulk_string() {

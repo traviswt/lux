@@ -369,6 +369,24 @@ pub fn eval(
         .exec()
         .map_err(|e| format!("ERR lua error: {}", e))?;
 
+    // Limit execution to 1M VM instructions to prevent infinite loops,
+    // infinite recursion, and CPU exhaustion from malicious scripts.
+    lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(10_000), {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        move |_lua, _debug| {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n >= 100 {
+                // 100 callbacks * 10,000 instructions = 1M instructions max
+                Err(mlua::Error::RuntimeError(
+                    "ERR script exceeded maximum execution limit (1000000 instructions)"
+                        .to_string(),
+                ))
+            } else {
+                Ok(mlua::VmState::Continue)
+            }
+        }
+    });
+
     let result: mlua::Value = lua.load(script).eval().map_err(|e| format!("ERR {}", e))?;
 
     let mut out = BytesMut::new();

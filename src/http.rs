@@ -8,6 +8,22 @@ use crate::cmd;
 use crate::pubsub::Broker;
 use crate::store::Store;
 
+/// Constant-time byte comparison to prevent timing attacks on auth tokens.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        let mut _acc = 0u8;
+        for &byte in a {
+            _acc |= byte;
+        }
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub async fn start_http_server(
     port: u16,
     store: Arc<Store>,
@@ -94,7 +110,7 @@ async fn handle_request(
             .unwrap_or("");
 
         let token = auth.strip_prefix("Bearer ").unwrap_or("");
-        if token != password {
+        if !constant_time_eq(token.as_bytes(), password.as_bytes()) {
             let body = r#"{"error":"unauthorized"}"#;
             return send_json(socket, 401, "Unauthorized", body).await;
         }

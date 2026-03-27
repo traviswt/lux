@@ -291,16 +291,32 @@ fn execute_geosearch(
         }
         if let Some(asc) = params.sort {
             if asc {
-                results.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+                results.sort_by(|a, b| {
+                    a.dist
+                        .partial_cmp(&b.dist)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             } else {
-                results.sort_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap());
+                results.sort_by(|a, b| {
+                    b.dist
+                        .partial_cmp(&a.dist)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
         }
     } else {
         if params.sort.is_some() || params.count.is_some() {
             match params.sort {
-                Some(false) => results.sort_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap()),
-                _ => results.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap()),
+                Some(false) => results.sort_by(|a, b| {
+                    b.dist
+                        .partial_cmp(&a.dist)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+                _ => results.sort_by(|a, b| {
+                    a.dist
+                        .partial_cmp(&b.dist)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
             }
         }
         if let Some(count) = params.count {

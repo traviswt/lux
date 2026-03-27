@@ -1,13 +1,16 @@
 mod cmd;
+mod disk;
 mod eviction;
 mod geo;
 mod hll;
 mod hnsw;
+mod http;
 mod lua;
 mod pubsub;
 mod resp;
 mod snapshot;
 mod store;
+mod tables;
 
 use bytes::BytesMut;
 use cmd::CmdResult;
@@ -62,18 +65,29 @@ async fn main() -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).await?;
     let store = Arc::new(Store::new());
+    if disk::storage_config().mode == disk::StorageMode::Tiered {
+        println!("storage: tiered mode (dir: {})", disk::storage_config().dir);
+    }
     let broker = Broker::new();
     let script_engine = Arc::new(lua::ScriptEngine::new());
 
     let require_auth = std::env::var("LUX_PASSWORD").is_ok_and(|p| !p.is_empty());
 
+    store
+        .wal_suppress
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     match snapshot::load(&store) {
         Ok(0) => println!("no snapshot found"),
         Ok(n) => println!("loaded {n} keys from snapshot"),
         Err(e) => eprintln!("snapshot load error: {e}"),
     }
+    store
+        .wal_suppress
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    store.replay_wal(&broker);
 
     tokio::spawn(snapshot::background_save_loop(store.clone()));
+    tokio::spawn(broker.clone().run_key_event_loop());
 
     {
         let store = store.clone();
@@ -87,6 +101,43 @@ async fn main() -> std::io::Result<()> {
                 store.expire_sweep(now);
             }
         });
+    }
+
+    if disk::storage_config().mode == disk::StorageMode::Tiered {
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    store.fsync_wal();
+                }
+            });
+        }
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    store.compact_disk_shards();
+                }
+            });
+        }
+    }
+
+    {
+        let http_port: u16 = std::env::var("LUX_HTTP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if http_port > 0 {
+            let http_store = store.clone();
+            let http_broker = broker.clone();
+            tokio::spawn(async move {
+                if let Err(e) = http::start_http_server(http_port, http_store, http_broker).await {
+                    eprintln!("http server error: {e}");
+                }
+            });
+        }
     }
 
     if tls_config.is_some() {
@@ -154,6 +205,42 @@ fn is_tx_cmd(cmd: &[u8]) -> bool {
         || cmd_eq_fast(cmd, b"UNWATCH")
 }
 
+#[inline(always)]
+fn fire_key_events(broker: &Broker, args: &[&[u8]]) {
+    if args.len() < 2 || !broker.has_key_subs() {
+        return;
+    }
+    fire_key_events_slow(broker, args);
+}
+
+#[inline(never)]
+fn fire_key_events_slow(broker: &Broker, args: &[&[u8]]) {
+    let cmd = args[0];
+    if !crate::eviction::is_write_command(cmd) {
+        return;
+    }
+    if cmd_eq_fast(cmd, b"FLUSHDB") || cmd_eq_fast(cmd, b"FLUSHALL") {
+        return;
+    }
+
+    if cmd_eq_fast(cmd, b"MSET") || cmd_eq_fast(cmd, b"MSETNX") {
+        let mut i = 1;
+        while i < args.len() {
+            broker.enqueue_key_event(args[i], cmd);
+            i += 2;
+        }
+    } else if cmd_eq_fast(cmd, b"DEL") || cmd_eq_fast(cmd, b"UNLINK") {
+        for arg in &args[1..] {
+            broker.enqueue_key_event(arg, cmd);
+        }
+    } else if cmd_eq_fast(cmd, b"RENAME") && args.len() >= 3 {
+        broker.enqueue_key_event(args[1], cmd);
+        broker.enqueue_key_event(args[2], cmd);
+    } else {
+        broker.enqueue_key_event(args[1], cmd);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_tx_cmd(
     args: &[&[u8]],
@@ -211,14 +298,17 @@ async fn handle_tx_cmd(
                     let refs: Vec<&[u8]> = owned_args.iter().map(|v| v.as_slice()).collect();
                     let cmd_result = {
                         let _guard = SCRIPT_GATE.read();
-                        cmd::execute(store, broker, &refs, write_buf, now)
+                        cmd::execute_with_wal(store, broker, &refs, write_buf, now)
                     };
                     match cmd_result {
                         CmdResult::Written => {}
                         CmdResult::Authenticated => {
                             *authenticated = true;
                         }
-                        CmdResult::Subscribe { .. } | CmdResult::PSubscribe { .. } => {
+                        CmdResult::Subscribe { .. }
+                        | CmdResult::PSubscribe { .. }
+                        | CmdResult::KSubscribe { .. }
+                        | CmdResult::KUnsubscribe { .. } => {
                             resp::write_error(
                                 write_buf,
                                 "ERR Command 'subscribe' not allowed inside a transaction",
@@ -289,7 +379,11 @@ async fn handle_tx_cmd(
     }
 
     if *in_multi {
-        if cmd_eq_fast(args[0], b"SUBSCRIBE") || cmd_eq_fast(args[0], b"PSUBSCRIBE") {
+        if cmd_eq_fast(args[0], b"SUBSCRIBE")
+            || cmd_eq_fast(args[0], b"PSUBSCRIBE")
+            || cmd_eq_fast(args[0], b"KSUB")
+            || cmd_eq_fast(args[0], b"KUNSUB")
+        {
             resp::write_error(
                 write_buf,
                 &format!(
@@ -364,6 +458,7 @@ where
     let mut pending = BytesMut::new();
     let mut subscriptions: HashMap<String, broadcast::Receiver<pubsub::Message>> = HashMap::new();
     let mut pattern_subs: HashMap<String, broadcast::Receiver<pubsub::Message>> = HashMap::new();
+    let mut key_subs: HashMap<String, broadcast::Receiver<pubsub::Message>> = HashMap::new();
     let mut sub_mode = false;
     let mut authenticated = !require_auth;
     let mut in_multi = false;
@@ -395,7 +490,7 @@ where
                                 resp::write_array_header(&mut write_buf, 3);
                                 resp::write_bulk(&mut write_buf, "subscribe");
                                 resp::write_bulk(&mut write_buf, &ch);
-                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len()) as i64);
+                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
                             }
                         } else if cmd_eq_fast(args[0], b"UNSUBSCRIBE") {
                             let channels: Vec<String> = if args.len() > 1 {
@@ -408,7 +503,7 @@ where
                                 resp::write_array_header(&mut write_buf, 3);
                                 resp::write_bulk(&mut write_buf, "unsubscribe");
                                 resp::write_bulk(&mut write_buf, ch);
-                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len()) as i64);
+                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
                             }
                             if subscriptions.is_empty() && pattern_subs.is_empty() {
                                 sub_mode = false;
@@ -423,7 +518,7 @@ where
                                 resp::write_array_header(&mut write_buf, 3);
                                 resp::write_bulk(&mut write_buf, "psubscribe");
                                 resp::write_bulk(&mut write_buf, &pat);
-                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len()) as i64);
+                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
                             }
                         } else if cmd_eq_fast(args[0], b"PUNSUBSCRIBE") {
                             let patterns: Vec<String> = if args.len() > 1 {
@@ -436,9 +531,43 @@ where
                                 resp::write_array_header(&mut write_buf, 3);
                                 resp::write_bulk(&mut write_buf, "punsubscribe");
                                 resp::write_bulk(&mut write_buf, pat);
-                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len()) as i64);
+                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
                             }
-                            if subscriptions.is_empty() && pattern_subs.is_empty() {
+                            if subscriptions.is_empty() && pattern_subs.is_empty() && key_subs.is_empty() {
+                                sub_mode = false;
+                            }
+                        } else if cmd_eq_fast(args[0], b"KSUB") {
+                            if args.len() < 2 {
+                                resp::write_error(&mut write_buf, "ERR wrong number of arguments for 'ksub' command");
+                            } else {
+                                for pat_bytes in &args[1..] {
+                                    let pat = std::str::from_utf8(pat_bytes).unwrap_or("").to_string();
+                                    if !key_subs.contains_key(&pat) {
+                                        let rx = broker.ksubscribe(&pat);
+                                        key_subs.insert(pat.clone(), rx);
+                                    }
+                                    resp::write_array_header(&mut write_buf, 3);
+                                    resp::write_bulk(&mut write_buf, "ksub");
+                                    resp::write_bulk(&mut write_buf, &pat);
+                                    resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
+                                }
+                            }
+                        } else if cmd_eq_fast(args[0], b"KUNSUB") {
+                            let patterns: Vec<String> = if args.len() > 1 {
+                                args[1..].iter().map(|a| std::str::from_utf8(a).unwrap_or("").to_string()).collect()
+                            } else {
+                                key_subs.keys().cloned().collect()
+                            };
+                            for pat in &patterns {
+                                if key_subs.remove(pat).is_some() {
+                                    broker.kunsub(pat);
+                                }
+                                resp::write_array_header(&mut write_buf, 3);
+                                resp::write_bulk(&mut write_buf, "kunsub");
+                                resp::write_bulk(&mut write_buf, pat);
+                                resp::write_integer(&mut write_buf, (subscriptions.len() + pattern_subs.len() + key_subs.len()) as i64);
+                            }
+                            if subscriptions.is_empty() && pattern_subs.is_empty() && key_subs.is_empty() {
                                 sub_mode = false;
                             }
                         } else if cmd_eq_fast(args[0], b"PING") {
@@ -470,6 +599,11 @@ where
                             return Some(msg);
                         }
                     }
+                    for (_pat, rx) in key_subs.iter_mut() {
+                        if let Ok(msg) = rx.try_recv() {
+                            return Some(msg);
+                        }
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     for (_ch, rx) in subscriptions.iter_mut() {
                         if let Ok(msg) = rx.try_recv() {
@@ -481,20 +615,36 @@ where
                             return Some(msg);
                         }
                     }
+                    for (_pat, rx) in key_subs.iter_mut() {
+                        if let Ok(msg) = rx.try_recv() {
+                            return Some(msg);
+                        }
+                    }
                     None
                 } => {
                     if let Some(msg) = msg {
-                        if let Some(ref pat) = msg.pattern {
-                            resp::write_array_header(&mut write_buf, 4);
-                            resp::write_bulk(&mut write_buf, "pmessage");
-                            resp::write_bulk(&mut write_buf, pat);
-                            resp::write_bulk(&mut write_buf, &msg.channel);
-                            resp::write_bulk(&mut write_buf, &msg.payload);
-                        } else {
-                            resp::write_array_header(&mut write_buf, 3);
-                            resp::write_bulk(&mut write_buf, "message");
-                            resp::write_bulk(&mut write_buf, &msg.channel);
-                            resp::write_bulk(&mut write_buf, &msg.payload);
+                        match msg.kind {
+                            pubsub::MessageKind::KeyEvent => {
+                                resp::write_array_header(&mut write_buf, 4);
+                                resp::write_bulk(&mut write_buf, "kmessage");
+                                resp::write_bulk(&mut write_buf, msg.pattern.as_deref().unwrap_or(""));
+                                resp::write_bulk(&mut write_buf, &msg.channel);
+                                resp::write_bulk(&mut write_buf, &msg.payload);
+                            }
+                            pubsub::MessageKind::PubSub => {
+                                if let Some(ref pat) = msg.pattern {
+                                    resp::write_array_header(&mut write_buf, 4);
+                                    resp::write_bulk(&mut write_buf, "pmessage");
+                                    resp::write_bulk(&mut write_buf, pat);
+                                    resp::write_bulk(&mut write_buf, &msg.channel);
+                                    resp::write_bulk(&mut write_buf, &msg.payload);
+                                } else {
+                                    resp::write_array_header(&mut write_buf, 3);
+                                    resp::write_bulk(&mut write_buf, "message");
+                                    resp::write_bulk(&mut write_buf, &msg.channel);
+                                    resp::write_bulk(&mut write_buf, &msg.payload);
+                                }
+                            }
                         }
                         socket.write_all(&write_buf).await?;
                         write_buf.clear();
@@ -527,6 +677,7 @@ where
                 for args in &commands {
                     if !authenticated
                         && !cmd_eq_fast(args[0], b"AUTH")
+                        && !cmd_eq_fast(args[0], b"HELLO")
                         && !cmd_eq_fast(args[0], b"PING")
                         && !cmd_eq_fast(args[0], b"QUIT")
                     {
@@ -554,10 +705,12 @@ where
 
                     let cmd_result = {
                         let _guard = SCRIPT_GATE.read();
-                        cmd::execute(&store, &broker, args, &mut write_buf, now)
+                        cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now)
                     };
                     match cmd_result {
-                        CmdResult::Written => {}
+                        CmdResult::Written => {
+                            fire_key_events(&broker, args);
+                        }
                         CmdResult::Authenticated => {
                             authenticated = true;
                         }
@@ -590,6 +743,44 @@ where
                             }
                             sub_mode = true;
                             break;
+                        }
+                        CmdResult::KSubscribe { patterns } => {
+                            for pat in &patterns {
+                                if !key_subs.contains_key(pat) {
+                                    let rx = broker.ksubscribe(pat);
+                                    key_subs.insert(pat.clone(), rx);
+                                }
+                                resp::write_array_header(&mut write_buf, 3);
+                                resp::write_bulk(&mut write_buf, "ksub");
+                                resp::write_bulk(&mut write_buf, pat);
+                                resp::write_integer(
+                                    &mut write_buf,
+                                    (subscriptions.len() + pattern_subs.len() + key_subs.len())
+                                        as i64,
+                                );
+                            }
+                            sub_mode = true;
+                            break;
+                        }
+                        CmdResult::KUnsubscribe { patterns } => {
+                            let pats: Vec<String> = if patterns.is_empty() {
+                                key_subs.keys().cloned().collect()
+                            } else {
+                                patterns
+                            };
+                            for pat in &pats {
+                                if key_subs.remove(pat).is_some() {
+                                    broker.kunsub(pat);
+                                }
+                                resp::write_array_header(&mut write_buf, 3);
+                                resp::write_bulk(&mut write_buf, "kunsub");
+                                resp::write_bulk(&mut write_buf, pat);
+                                resp::write_integer(
+                                    &mut write_buf,
+                                    (subscriptions.len() + pattern_subs.len() + key_subs.len())
+                                        as i64,
+                                );
+                            }
                         }
                         CmdResult::Publish { channel, message } => {
                             let count = broker.publish(&channel, message);
@@ -632,6 +823,7 @@ where
                 for args in &commands {
                     if !authenticated
                         && !cmd_eq_fast(args[0], b"AUTH")
+                        && !cmd_eq_fast(args[0], b"HELLO")
                         && !cmd_eq_fast(args[0], b"PING")
                         && !cmd_eq_fast(args[0], b"QUIT")
                     {
@@ -640,6 +832,8 @@ where
                     }
                     if cmd_eq_fast(args[0], b"SUBSCRIBE")
                         || cmd_eq_fast(args[0], b"PSUBSCRIBE")
+                        || cmd_eq_fast(args[0], b"KSUB")
+                        || cmd_eq_fast(args[0], b"KUNSUB")
                         || cmd_eq_fast(args[0], b"PUBLISH")
                         || cmd_eq_fast(args[0], b"AUTH")
                         || is_tx_cmd(args[0])
@@ -702,10 +896,12 @@ where
 
                         let cmd_result = {
                             let _guard = SCRIPT_GATE.read();
-                            cmd::execute(&store, &broker, args, &mut write_buf, now)
+                            cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now)
                         };
                         match cmd_result {
-                            CmdResult::Written => {}
+                            CmdResult::Written => {
+                                fire_key_events(&broker, args);
+                            }
                             CmdResult::Authenticated => {
                                 authenticated = true;
                             }
@@ -738,6 +934,44 @@ where
                                 }
                                 sub_mode = true;
                                 break;
+                            }
+                            CmdResult::KSubscribe { patterns } => {
+                                for pat in &patterns {
+                                    if !key_subs.contains_key(pat) {
+                                        let rx = broker.ksubscribe(pat);
+                                        key_subs.insert(pat.clone(), rx);
+                                    }
+                                    resp::write_array_header(&mut write_buf, 3);
+                                    resp::write_bulk(&mut write_buf, "ksub");
+                                    resp::write_bulk(&mut write_buf, pat);
+                                    resp::write_integer(
+                                        &mut write_buf,
+                                        (subscriptions.len() + pattern_subs.len() + key_subs.len())
+                                            as i64,
+                                    );
+                                }
+                                sub_mode = true;
+                                break;
+                            }
+                            CmdResult::KUnsubscribe { patterns } => {
+                                let pats: Vec<String> = if patterns.is_empty() {
+                                    key_subs.keys().cloned().collect()
+                                } else {
+                                    patterns
+                                };
+                                for pat in &pats {
+                                    if key_subs.remove(pat).is_some() {
+                                        broker.kunsub(pat);
+                                    }
+                                    resp::write_array_header(&mut write_buf, 3);
+                                    resp::write_bulk(&mut write_buf, "kunsub");
+                                    resp::write_bulk(&mut write_buf, pat);
+                                    resp::write_integer(
+                                        &mut write_buf,
+                                        (subscriptions.len() + pattern_subs.len() + key_subs.len())
+                                            as i64,
+                                    );
+                                }
                             }
                             CmdResult::Publish { channel, message } => {
                                 let count = broker.publish(&channel, message);
@@ -835,17 +1069,36 @@ where
                         if all_classified {
                             let has_writes = batch_flags.contains(&FL_WRITE);
                             if has_writes {
-                                let mut shard = store.lock_write_shard(shard_idx as usize);
-                                shard.version += 1;
                                 for args in &commands[i..batch_end] {
-                                    cmd::execute_on_shard(
-                                        &mut shard.data,
-                                        &store,
-                                        &broker,
-                                        args,
-                                        &mut write_buf,
-                                        now,
-                                    );
+                                    if args.len() > 1 {
+                                        store.try_promote(args[1], now);
+                                    }
+                                    if args.len() > 1 && crate::eviction::is_write_command(args[0])
+                                    {
+                                        store.wal_log_command(args);
+                                    }
+                                }
+                                {
+                                    let mut shard = store.lock_write_shard(shard_idx as usize);
+                                    shard.version += 1;
+                                    for args in &commands[i..batch_end] {
+                                        cmd::execute_on_shard(
+                                            &mut shard.data,
+                                            &store,
+                                            &broker,
+                                            args,
+                                            &mut write_buf,
+                                            now,
+                                        );
+                                    }
+                                }
+                                if broker.has_key_subs() {
+                                    for idx in i..batch_end {
+                                        if batch_flags[idx - i] == FL_WRITE {
+                                            let cmd_args = &commands[idx];
+                                            broker.enqueue_key_event(cmd_args[1], cmd_args[0]);
+                                        }
+                                    }
                                 }
                             } else {
                                 let shard = store.lock_read_shard(shard_idx as usize);
@@ -860,7 +1113,8 @@ where
                             }
                         } else {
                             for args in &commands[i..batch_end] {
-                                cmd::execute(&store, &broker, args, &mut write_buf, now);
+                                cmd::execute_with_wal(&store, &broker, args, &mut write_buf, now);
+                                fire_key_events(&broker, args);
                             }
                         }
 

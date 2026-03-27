@@ -1,4 +1,6 @@
 /target
+/cli/target
+cli/.env
 *.dat
 *.dat.tmp
 sdk/node_modules/

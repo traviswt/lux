@@ -31,8 +31,53 @@ pub fn cmd_quit(_args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Insta
     CmdResult::Written
 }
 
-pub fn cmd_hello(_args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Instant) -> CmdResult {
-    resp::write_array_header(out, 14);
+pub fn cmd_hello(args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Instant) -> CmdResult {
+    let mut authenticated = false;
+    let mut auth_failed = false;
+    let mut i = 2;
+    while i < args.len() {
+        if cmd_eq(args[i], b"AUTH") {
+            if i + 2 >= args.len() {
+                resp::write_error(
+                    out,
+                    "ERR wrong number of arguments for 'hello' AUTH section",
+                );
+                return CmdResult::Written;
+            }
+            let password = arg_str(args[i + 2]);
+            let expected = std::env::var("LUX_PASSWORD").unwrap_or_default();
+            if expected.is_empty() {
+                resp::write_error(out, "ERR Client sent AUTH, but no password is set");
+                return CmdResult::Written;
+            } else if constant_time_eq(password.as_bytes(), expected.as_bytes()) {
+                authenticated = true;
+            } else {
+                auth_failed = true;
+            }
+            i += 3;
+        } else if cmd_eq(args[i], b"SETNAME") {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    if auth_failed {
+        resp::write_error(out, "WRONGPASS invalid password");
+        return CmdResult::Written;
+    }
+
+    let requested_proto = if args.len() >= 2 {
+        arg_str(args[1]).parse::<i64>().unwrap_or(2)
+    } else {
+        2
+    };
+
+    if requested_proto == 3 {
+        resp::write_map_header(out, 7);
+    } else {
+        resp::write_array_header(out, 14);
+    }
     resp::write_bulk(out, "server");
     resp::write_bulk(out, "lux");
     resp::write_bulk(out, "version");
@@ -47,6 +92,10 @@ pub fn cmd_hello(_args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Inst
     resp::write_bulk(out, "master");
     resp::write_bulk(out, "modules");
     resp::write_array_header(out, 0);
+
+    if authenticated {
+        return CmdResult::Authenticated;
+    }
     CmdResult::Written
 }
 
@@ -103,6 +152,24 @@ pub fn cmd_lastsave(
     CmdResult::Written
 }
 
+/// Constant-time byte comparison to prevent timing attacks on password auth.
+/// Always compares all bytes regardless of where the first mismatch is.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Still do a dummy comparison to avoid leaking length via timing.
+        let mut _acc = 0u8;
+        for &byte in a {
+            _acc |= byte;
+        }
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub fn cmd_auth(args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Instant) -> CmdResult {
     if args.len() < 2 {
         resp::write_error(out, "ERR wrong number of arguments for 'auth' command");
@@ -111,7 +178,7 @@ pub fn cmd_auth(args: &[&[u8]], _store: &Store, out: &mut BytesMut, _now: Instan
     let expected = std::env::var("LUX_PASSWORD").unwrap_or_default();
     if expected.is_empty() {
         resp::write_error(out, "ERR Client sent AUTH, but no password is set");
-    } else if arg_str(args[1]) == expected {
+    } else if constant_time_eq(arg_str(args[1]).as_bytes(), expected.as_bytes()) {
         resp::write_ok(out);
         return CmdResult::Authenticated;
     } else {
@@ -183,6 +250,16 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
          # Memory\r\n\
          used_memory_bytes:{}\r\n\
          \r\n\
+         # Storage\r\n\
+         storage_mode:{}\r\n\
+         used_disk_bytes:{}\r\n\
+         disk_keys:{}\r\n\
+         \r\n\
+         # Persistence\r\n\
+         persistence_err_wal_append:{}\r\n\
+         persistence_err_wal_fsync:{}\r\n\
+         persistence_err_disk_write:{}\r\n\
+         \r\n\
          # Keyspace\r\n\
          db0:keys={},expires=0,avg_ttl=0\r\n\
          keys:{}\r\n\
@@ -193,6 +270,16 @@ fn build_info(store: &Store, _section: &str, now: Instant) -> String {
         CONNECTED_CLIENTS.load(Ordering::Relaxed),
         TOTAL_COMMANDS.load(Ordering::Relaxed),
         store.approximate_memory(),
+        if crate::disk::storage_config().mode == crate::disk::StorageMode::Tiered {
+            "tiered"
+        } else {
+            "memory"
+        },
+        store.disk_usage_bytes(),
+        store.disk_key_count(),
+        crate::store::PERSISTENCE_ERR_WAL_APPEND.load(Ordering::Relaxed),
+        crate::store::PERSISTENCE_ERR_WAL_FSYNC.load(Ordering::Relaxed),
+        crate::store::PERSISTENCE_ERR_DISK_WRITE.load(Ordering::Relaxed),
         store.dbsize(now),
         store.dbsize(now),
         store.vcard(now)

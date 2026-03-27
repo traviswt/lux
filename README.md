@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A Redis-compatible key-value store. Up to 10x faster.</strong><br/>
-  Multi-threaded. Built-in vector search, time series, and GEO. BullMQ-compatible. Written in Rust. MIT licensed forever.
+  Multi-threaded. Built-in vector search, time series, realtime key subscriptions, and GEO. BullMQ-compatible. Written in Rust. MIT licensed forever.
 </p>
 
 <p align="center">
@@ -70,7 +70,9 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 
 ## Features
 
-- **200+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, time series, HyperLogLog, bitops, pub/sub, transactions
+- **200+ commands** -- strings, lists, hashes, sets, sorted sets, streams, vectors, geo, time series, tables, HyperLogLog, bitops, pub/sub, transactions
+- **Relational tables** -- TCREATE, TINSERT, TQUERY, TALTER with typed fields (str, int, float, bool, timestamp), unique constraints, foreign keys, joins, WHERE/ORDER BY/LIMIT. Structured data without standing up Postgres
+- **Realtime key subscriptions** -- KSUB/KUNSUB: subscribe to key patterns, receive events when matching keys are mutated. Zero overhead when unused. No global config flags, no separate services. Unlike Redis keyspace notifications which tax every write globally, KSUB is surgical and async
 - **Native time series** -- TSADD, TSGET, TSRANGE, TSMRANGE with aggregation (avg, sum, min, max, count, std), retention policies, and label-based filtering. No modules, no sidecars. TSGET 4x faster than Redis GET
 - **Native vector search** -- VSET, VGET, VSEARCH with cosine similarity and metadata filtering. No extensions, no sidecars
 - **GEO commands** -- GEOADD, GEOSEARCH, GEODIST, GEOPOS, GEOHASH, GEORADIUS with up to 10x faster spatial queries
@@ -79,13 +81,14 @@ Don't want to manage infrastructure? **[Lux Cloud](https://luxdb.dev)** is manag
 - **Lua scripting** -- EVAL, EVALSHA, SCRIPT with redis.call/pcall, cmsgpack, and cjson
 - **Redis Streams** -- XADD, XREAD, XREADGROUP, XACK, consumer groups, blocking reads
 - **Blocking commands** -- BLPOP, BRPOP, BLMOVE, BZPOPMIN, BZPOPMAX
+- **HTTP REST API** -- built-in JSON API on a separate port, 174K ops/sec, Bearer auth, CORS
 - **RESP2 protocol** -- compatible with every Redis client
 - **Multi-threaded** -- auto-tuned shards, parking_lot RwLocks, tokio async runtime
 - **Zero-copy parser** -- RESP arguments are byte slices into the read buffer
 - **Pipeline batching** -- consecutive same-shard commands batched under a single lock
-- **Persistence** -- automatic snapshots, configurable interval
+- **Persistence** -- automatic snapshots, write-ahead log (WAL) with CRC32 checksums, tiered hot/cold storage with automatic eviction to disk
 - **Auth** -- password authentication via `LUX_PASSWORD`
-- **Pub/Sub** -- SUBSCRIBE, PSUBSCRIBE, UNSUBSCRIBE, PUNSUBSCRIBE, PUBLISH
+- **Pub/Sub** -- SUBSCRIBE, PSUBSCRIBE, PUBLISH, plus KSUB/KUNSUB for realtime key change events
 - **TTL support** -- EX, PX, EXPIRE, PEXPIRE, PERSIST, TTL, PTTL
 - **MIT licensed** -- no license rug-pulls, unlike Redis (RSALv2/SSPL)
 
@@ -166,10 +169,88 @@ redis-cli TSMADD cpu:host1 '*' 72.5 mem:host1 '*' 45.0 disk:host1 '*' 82.1
 
 TSGET runs at 18M ops/sec at high pipeline. Supports avg, sum, min, max, count, first, last, range, std.p, std.s, var.p, var.s aggregation functions.
 
+### Realtime Key Subscriptions (KSUB)
+
+Subscribe to key mutation events by pattern. When any client writes to a matching key, subscribers receive a realtime notification with the key name and operation. No polling, no keyspace notification config, no separate service.
+
+```bash
+# Client A: subscribe to all user key mutations
+redis-cli
+> KSUB user:*
+
+# Client B: write some data
+redis-cli
+> SET user:1 alice
+> HSET user:2 name bob
+> DEL user:1
+
+# Client A receives:
+# ["kmessage", "user:*", "user:1", "set"]
+# ["kmessage", "user:*", "user:2", "hset"]
+# ["kmessage", "user:*", "user:1", "del"]
+```
+
+Events are `["kmessage", pattern, key, operation]`. Operations are lowercase command names: `set`, `del`, `lpush`, `hset`, `zadd`, `tsadd`, etc.
+
+**How it differs from Redis keyspace notifications:**
+- Redis requires a global `notify-keyspace-events` config flag that adds overhead to every write, even if nobody is listening
+- KSUB has zero overhead when no subscribers exist (single atomic check)
+- When subscribers exist, event dispatch is fully async -- writes enqueue to a lock-free channel and a background task handles matching and delivery. The write path never blocks on subscriber fanout
+
+Built for reactive applications, cache invalidation, live dashboards, and any use case where you need to react to data changes without polling.
+
+### Tables
+
+Built-in relational tables with typed fields, indexes, unique constraints, foreign keys, and joins.
+
+```bash
+# Create a table with typed fields
+redis-cli TCREATE users name:str email:str:unique age:int active:bool created_at:timestamp
+
+# Insert rows (* auto-generates timestamp)
+redis-cli TINSERT users name Alice email alice@example.com age 28 active true created_at *
+redis-cli TINSERT users name Bob email bob@example.com age 35 active false created_at *
+
+# Query with WHERE, ORDER BY, LIMIT
+redis-cli TQUERY users WHERE age > 25 ORDER BY age DESC
+
+# Foreign keys and joins
+redis-cli TCREATE posts title:str author:ref(users)
+redis-cli TINSERT posts title "Hello World" author 1
+redis-cli TQUERY posts JOIN author
+
+# Alter tables
+redis-cli TALTER users ADD role:str
+redis-cli TALTER users DROP role
+```
+
+Field types: `str`, `int`, `float`, `bool`, `timestamp`, `ref(table)`. Supports `:unique` constraint.
+
+### CLI
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lux-db/lux/main/cli/install.sh | sh
+```
+
+```bash
+luxctl login                              # authenticate with a lux_ token
+luxctl projects                           # list projects
+luxctl create my-app --accept-charges     # create a new project
+luxctl status my-app                      # show status and metrics
+luxctl exec my-app SET hello world        # run a command
+luxctl logs my-app                        # fetch logs
+luxctl restart my-app                     # restart instance
+luxctl connect my-app                     # interactive REPL via cloud
+luxctl connect lux://localhost:6379       # connect to local instance
+luxctl destroy my-app --accept-consequences  # delete project
+```
+
+See [cli/README.md](cli/README.md) for full installation and usage docs.
+
 ### SDK
 
 ```bash
-npm install @luxdb/sdk
+bun i @luxdb/sdk
 ```
 
 ```typescript
@@ -180,30 +261,104 @@ const db = new Lux("redis://localhost:6379")
 await db.set("hello", "world")
 
 await db.vset("doc:1", embedding, { metadata: { title: "my doc" } })
-
 const results = await db.vsearch(queryEmbedding, { k: 5, meta: true })
+
+await db.tsadd("cpu:host1", '*', 72.5, { labels: { host: "server1" } })
+const latest = await db.tsget("cpu:host1")
+const range = await db.tsrange("cpu:host1", '-', '+', {
+  aggregation: { type: 'avg', bucketSize: 3600000 }
+})
+
+const sub = db.ksub(["user:*"], (event) => {
+  console.log(`${event.key} was ${event.operation}`)
+})
 ```
 
-Extends ioredis with typed methods for vector operations. All standard Redis commands work as usual.
+Extends ioredis with typed methods for vectors, time series, and realtime key subscriptions. All standard Redis commands work as usual.
+
+### HTTP REST API
+
+Lux has a built-in HTTP/JSON API. Set `LUX_HTTP_PORT` to enable it alongside the RESP protocol. Every data primitive gets its own RESTful routes.
+
+```bash
+LUX_HTTP_PORT=8080 ./target/release/lux
+```
+
+**Key-Value:**
+```bash
+curl http://localhost:8080/v1/kv/mykey                    # GET
+curl -X PUT http://localhost:8080/v1/kv/mykey \
+  -d '{"value":"hello","ex":3600}'                        # SET (with optional TTL)
+curl -X DELETE http://localhost:8080/v1/kv/mykey           # DEL
+curl -X POST http://localhost:8080/v1/kv/counter/incr      # INCR
+curl http://localhost:8080/v1/kv/myhash/hash               # HGETALL
+curl http://localhost:8080/v1/kv/mylist/list                # LRANGE
+curl http://localhost:8080/v1/kv/myset/set                 # SMEMBERS
+curl http://localhost:8080/v1/kv/myzset/zset               # ZRANGEBYSCORE
+```
+
+**Tables:**
+```bash
+curl -X POST http://localhost:8080/v1/tables \
+  -d '{"name":"users","columns":["name:str","age:int"]}'   # TCREATE
+curl http://localhost:8080/v1/tables                        # TLIST
+curl -X POST http://localhost:8080/v1/tables/users \
+  -d '{"name":"Alice","age":"28"}'                          # TINSERT
+curl 'http://localhost:8080/v1/tables/users?where=age>25&order=name&limit=10'  # TQUERY
+curl http://localhost:8080/v1/tables/users/1                # TGET
+curl -X PUT http://localhost:8080/v1/tables/users/1 \
+  -d '{"name":"Alicia"}'                                    # TUPDATE
+curl -X DELETE http://localhost:8080/v1/tables/users/1      # TDEL
+```
+
+**Time Series:**
+```bash
+curl -X POST http://localhost:8080/v1/ts/cpu:host1 \
+  -d '{"value":72.5,"labels":{"host":"server1"}}'          # TSADD
+curl http://localhost:8080/v1/ts/cpu:host1/latest           # TSGET
+curl 'http://localhost:8080/v1/ts/cpu:host1?from=-&to=+&agg=avg&bucket=3600000'  # TSRANGE
+curl http://localhost:8080/v1/ts/cpu:host1/info             # TSINFO
+```
+
+**Vectors:**
+```bash
+curl -X POST http://localhost:8080/v1/vectors/doc:1 \
+  -d '{"vector":[0.1,0.2,0.3],"metadata":{"title":"hello"}}'  # VSET
+curl http://localhost:8080/v1/vectors/doc:1                     # VGET
+curl -X POST http://localhost:8080/v1/vectors/search \
+  -d '{"vector":[0.1,0.2,0.3],"k":5}'                         # VSEARCH
+curl http://localhost:8080/v1/vectors                            # VCARD
+```
+
+**Exec (any command):**
+```bash
+curl -X POST http://localhost:8080/v1/exec \
+  -d '{"command":["HSET","user:1","name","alice"]}'
+```
+
+Auth via `Authorization: Bearer <password>` when `LUX_PASSWORD` is set. CORS enabled by default. 174K ops/sec at 256 concurrent connections with keep-alive.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LUX_PORT` | `6379` | TCP port |
-| `LUX_PASSWORD` | (none) | Enable AUTH |
+| `LUX_HTTP_PORT` | (disabled) | HTTP API port (set to enable) |
+| `LUX_PASSWORD` | (none) | Enable AUTH (applies to both RESP and HTTP) |
 | `LUX_DATA_DIR` | `.` | Snapshot directory |
 | `LUX_SAVE_INTERVAL` | `60` | Snapshot interval in seconds (0 to disable) |
 | `LUX_SHARDS` | auto | Shard count (default: num_cpus * 16) |
 | `LUX_MAXMEMORY` | `0` (unlimited) | Memory limit (e.g. `100mb`, `1gb`) |
 | `LUX_MAXMEMORY_POLICY` | `noeviction` | Eviction policy: `allkeys-lru`, `volatile-lru`, `allkeys-random`, `volatile-random` |
 | `LUX_MAXMEMORY_SAMPLES` | `5` | Keys sampled per eviction round |
+| `LUX_STORAGE_MODE` | `memory` | Set to `tiered` for hot/cold storage with disk-backed eviction |
+| `LUX_STORAGE_DIR` | `{LUX_DATA_DIR}/storage` | Directory for tiered storage data files |
 | `LUX_RESTRICTED` | (none) | Set to `1` to disable KEYS, FLUSHALL, FLUSHDB |
 
 ### Node.js
 
 ```bash
-npm install @luxdb/sdk   # or: npm install ioredis
+bun i @luxdb/sdk   # or: bun i ioredis
 ```
 
 ```typescript
@@ -240,7 +395,7 @@ rdb.Set(ctx, "hello", "world", 0)
 
 ## Testing
 
-Lux has 326 tests across unit and integration suites.
+Lux has 409 tests across unit, integration, property-based, and crash recovery suites.
 
 ```bash
 cargo test
@@ -253,10 +408,14 @@ cargo test
 | **Unit: resp** | 19 | RESP parser, serializers, edge cases |
 | **Unit: snapshot** | 7 | Roundtrip all data types including streams, TTL preservation |
 | **Unit: pubsub** | 5 | Broker subscribe/publish/isolation |
+| **Unit: disk** | 18 | CRC32 checksums, corruption detection, WAL/disk round-trips, partial write recovery, compaction, atomic writes |
+| **Fuzz: persistence** | 7 | proptest-driven: random bytes into parsers (no panics), round-trip equivalence for all 9 data types, WAL replay fidelity, DiskShard reopen consistency |
 | **Integration: transactions** | 29 | MULTI/EXEC, WATCH/UNWATCH, EXECABORT, DISCARD |
 | **Integration: auth** | 6 | Password gating, per-connection state, error paths |
 | **Integration: pubsub** | 10 | Cross-connection message delivery, unsubscribe, sub mode |
 | **Integration: persistence** | 3 | Snapshot save/restart/restore, FLUSHDB+SAVE |
+| **Integration: crash recovery** | 10 | Hard kill + WAL replay for all data types, snapshot+WAL interaction, MULTI/EXEC crash, repeated crash cycles, hot+cold data, DEL/FLUSHDB durability, rapid pipeline crash, corrupted WAL startup |
+| **Integration: tiered** | 18 | Cold storage reads/writes, eviction to disk, WAL crash recovery, snapshot with cold data, compaction |
 | **Integration: pipelines** | 3 | Ordering under contention, fast-path batching |
 | **Integration: blocking** | 6 | BLPOP/BRPOP immediate, timeout, woken-by-push, BLMOVE |
 | **Integration: streams** | 10 | XADD, XREAD, XREADGROUP, XACK, XREAD BLOCK, consumer groups |
@@ -265,6 +424,9 @@ cargo test
 | **Integration: geo** | 14 | GEOADD, GEODIST, GEOPOS, GEOHASH, GEOSEARCH, GEOSEARCHSTORE, GEORADIUS, edge cases |
 | **Integration: hll** | 9 | PFADD, PFCOUNT, PFMERGE, cardinality accuracy, multi-key count, merge, WRONGTYPE |
 | **Integration: timeseries** | 18 | TSADD, TSGET, TSRANGE, TSMRANGE, TSMADD, TSINFO, aggregation, retention, labels, filtering |
+| **Integration: ksub** | 6 | KSUB event delivery, pattern filtering, multiple patterns, KUNSUB, HSET/DEL events |
+| **Integration: http** | 14 | HTTP REST API: health, auth, KV CRUD, tables REST, time series REST, vectors REST, data types, exec, CORS, 404 |
+| **Integration: tables** | 14 | TCREATE, TINSERT, TGET, TQUERY, TUPDATE, TDEL, TDROP, TCOUNT, TLIST, TSCHEMA, joins, foreign keys, unique constraints |
 | **Valkey compat** | 10+ | Valkey multi.tcl test suite run against Lux |
 
 Run the benchmark against Redis:
@@ -306,11 +468,13 @@ Release and Docker builds only proceed after tests pass.
 
 **Time Series:** `TSADD` `TSMADD` `TSGET` `TSRANGE` `TSMRANGE` `TSINFO`
 
-**Pub/Sub:** `PUBLISH` `SUBSCRIBE` `PSUBSCRIBE` `UNSUBSCRIBE` `PUNSUBSCRIBE`
+**Pub/Sub:** `PUBLISH` `SUBSCRIBE` `PSUBSCRIBE` `UNSUBSCRIBE` `PUNSUBSCRIBE` `KSUB` `KUNSUB`
 
 **Transactions:** `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH`
 
 **Vectors:** `VSET` `VGET` `VSEARCH` `VCARD`
+
+**Tables:** `TCREATE` `TINSERT` `TGET` `TQUERY` `TUPDATE` `TDEL` `TDROP` `TCOUNT` `TSCHEMA` `TLIST` `TALTER`
 
 **Scripting:** `EVAL` `EVALSHA` `SCRIPT LOAD` `SCRIPT EXISTS` `SCRIPT FLUSH`
 
@@ -322,7 +486,7 @@ Release and Docker builds only proceed after tests pass.
 
 Lux is Redis-compatible but not identical. Key differences:
 
-- **No AOF persistence** -- snapshots only (configurable interval)
+- **No AOF persistence** -- Lux uses snapshots + a write-ahead log (WAL) with CRC32 checksums instead of Redis AOF. The WAL is fsync'd every 1 second (matching Redis `appendfsync everysec`). Maximum data loss on power failure is 1 second of writes
 - **No RESP3 protocol** -- RESP2 only
 - **No cluster mode** -- single-node only (use Lux Cloud for managed hosting)
 - **MULTI/EXEC** -- supported with WATCH-based optimistic locking. Commands in a transaction execute sequentially, each acquiring its own shard lock, so another client could observe intermediate state mid-EXEC. Redis avoids this via single-threading. Standard client libraries (Redlock, BullMQ, Sidekiq) rely on WATCH for correctness, not EXEC isolation. Full shard-locking isolation may be added in a future release if there's demand

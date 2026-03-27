@@ -12,6 +12,7 @@ mod sort;
 mod sorted_sets;
 mod streams;
 mod strings;
+mod tables;
 mod timeseries;
 mod vectors;
 
@@ -60,6 +61,12 @@ pub enum CmdResult {
         count: Option<usize>,
         noack: bool,
         timeout: std::time::Duration,
+    },
+    KSubscribe {
+        patterns: Vec<String>,
+    },
+    KUnsubscribe {
+        patterns: Vec<String>,
     },
     Eval {
         script: String,
@@ -129,6 +136,10 @@ pub fn execute(
     {
         resp::write_error(out, "ERR command disabled in restricted mode");
         return CmdResult::Written;
+    }
+
+    if args.len() > 1 {
+        store.try_promote(args[1], now);
     }
 
     if crate::eviction::is_write_command(cmd) {
@@ -359,6 +370,12 @@ pub fn execute(
         b'K' => {
             if cmd_eq(cmd, b"KEYS") {
                 return keys::cmd_keys(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"KSUB") {
+                return pubsub::cmd_ksub(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"KUNSUB") {
+                return pubsub::cmd_kunsub(args, store, out, now);
             }
         }
         b'L' => {
@@ -627,6 +644,39 @@ pub fn execute(
             if cmd_eq(cmd, b"TSINFO") {
                 return timeseries::cmd_tsinfo(args, store, out, now);
             }
+            if cmd_eq(cmd, b"TCREATE") {
+                return tables::cmd_tcreate(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TINSERT") {
+                return tables::cmd_tinsert(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TGET") {
+                return tables::cmd_tget(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TQUERY") {
+                return tables::cmd_tquery(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TUPDATE") {
+                return tables::cmd_tupdate(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TDEL") {
+                return tables::cmd_tdel(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TDROP") {
+                return tables::cmd_tdrop(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TCOUNT") {
+                return tables::cmd_tcount(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TSCHEMA") {
+                return tables::cmd_tschema(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TALTER") {
+                return tables::cmd_talter(args, store, out, now);
+            }
+            if cmd_eq(cmd, b"TLIST") {
+                return tables::cmd_tlist(args, store, out, now);
+            }
         }
         b'U' => {
             if cmd_eq(cmd, b"UNLINK") {
@@ -789,6 +839,19 @@ pub fn execute(
 
     resp::write_error(out, &format!("ERR unknown command '{}'", arg_str(cmd)));
     CmdResult::Written
+}
+
+pub fn execute_with_wal(
+    store: &Store,
+    broker: &Broker,
+    args: &[&[u8]],
+    out: &mut BytesMut,
+    now: Instant,
+) -> CmdResult {
+    if !args.is_empty() && crate::eviction::is_write_command(args[0]) {
+        store.wal_log_command(args);
+    }
+    execute(store, broker, args, out, now)
 }
 
 pub type ShardData = hashbrown::HashMap<String, Entry, crate::store::FxBuildHasher>;
@@ -1702,6 +1765,19 @@ pub fn is_known_command(cmd: &[u8]) -> bool {
         || cmd_eq(cmd, b"BITCOUNT")
         || cmd_eq(cmd, b"BITPOS")
         || cmd_eq(cmd, b"BITOP")
+        || cmd_eq(cmd, b"KSUB")
+        || cmd_eq(cmd, b"KUNSUB")
+        || cmd_eq(cmd, b"TCREATE")
+        || cmd_eq(cmd, b"TINSERT")
+        || cmd_eq(cmd, b"TGET")
+        || cmd_eq(cmd, b"TQUERY")
+        || cmd_eq(cmd, b"TUPDATE")
+        || cmd_eq(cmd, b"TDEL")
+        || cmd_eq(cmd, b"TDROP")
+        || cmd_eq(cmd, b"TCOUNT")
+        || cmd_eq(cmd, b"TSCHEMA")
+        || cmd_eq(cmd, b"TLIST")
+        || cmd_eq(cmd, b"TALTER")
 }
 
 pub fn validate_args(args: &[&[u8]]) -> Result<(), String> {

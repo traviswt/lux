@@ -82,6 +82,13 @@ pub fn write_array_header(buf: &mut BytesMut, len: usize) {
     }
 }
 
+pub fn write_map_header(buf: &mut BytesMut, len: usize) {
+    buf.put_u8(b'%');
+    let mut tmp = itoa::Buffer::new();
+    buf.extend_from_slice(tmp.format_usize(len).as_bytes());
+    buf.extend_from_slice(b"\r\n");
+}
+
 pub fn write_bulk_array(buf: &mut BytesMut, items: &[String]) {
     write_array_header(buf, items.len());
     for item in items {
@@ -165,6 +172,11 @@ impl<'a> Parser<'a> {
         };
         if count < 0 {
             return Ok(None);
+        }
+        // Cap array size to prevent OOM from malicious clients.
+        // 1M args is far beyond any legitimate command.
+        if count > 1_048_576 {
+            return Err("ERR RESP array count exceeds maximum");
         }
         let mut args = Vec::with_capacity(count as usize);
         for _ in 0..count {

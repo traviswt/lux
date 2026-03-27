@@ -10,6 +10,8 @@ categories = ["database", "caching"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 bytes = "1"
 parking_lot = "0.12"
 hashbrown = "0.14"

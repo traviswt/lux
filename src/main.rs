@@ -19,9 +19,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 use store::Store;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio_rustls::rustls;
 
 pub static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 pub static TOTAL_COMMANDS: AtomicUsize = AtomicUsize::new(0);
@@ -36,6 +37,28 @@ async fn main() -> std::io::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6379);
+
+    let tls_config = if let (Ok(cert_path), Ok(key_path)) =
+        (std::env::var("LUX_TLS_CERT"), std::env::var("LUX_TLS_KEY"))
+    {
+        let cert_file = std::fs::File::open(cert_path)?;
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+
+        let key_file = std::fs::File::open(key_path)?;
+        let mut key_reader = std::io::BufReader::new(key_file);
+        let key = rustls_pemfile::private_key(&mut key_reader)?
+            .ok_or_else(|| std::io::Error::other("no private key found"))?;
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(std::io::Error::other)?;
+        Some(Arc::new(config))
+    } else {
+        None
+    };
+
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).await?;
     let store = Arc::new(Store::new());
@@ -66,22 +89,46 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    println!("lux v{} ready on {addr}", env!("CARGO_PKG_VERSION"));
+    if tls_config.is_some() {
+        println!("lux v{} ready on {addr} (TLS)", env!("CARGO_PKG_VERSION"));
+    } else {
+        println!("lux v{} ready on {addr}", env!("CARGO_PKG_VERSION"));
+    }
 
     loop {
         let (socket, peer) = listener.accept().await?;
         let store = store.clone();
         let broker = broker.clone();
         let script_engine = script_engine.clone();
+        let tls_config = tls_config.clone();
         socket.set_nodelay(true).ok();
 
         tokio::spawn(async move {
             CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
-            let result =
-                handle_connection(socket, peer, store, broker, require_auth, script_engine).await;
+            let result = if let Some(config) = tls_config {
+                let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                match acceptor.accept(socket).await {
+                    Ok(tls_socket) => {
+                        handle_connection(
+                            tls_socket,
+                            peer,
+                            store,
+                            broker,
+                            require_auth,
+                            script_engine,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                handle_connection(socket, peer, store, broker, require_auth, script_engine).await
+            };
             CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
             if let Err(e) = result {
-                if e.kind() != std::io::ErrorKind::ConnectionReset {
+                if e.kind() != std::io::ErrorKind::ConnectionReset
+                    && e.kind() != std::io::ErrorKind::UnexpectedEof
+                {
                     eprintln!("connection error {peer}: {e}");
                 }
             }
@@ -301,14 +348,17 @@ fn is_blocking_cmd(cmd: &[u8]) -> bool {
         || cmd_eq_fast(cmd, b"SCRIPT")
 }
 
-async fn handle_connection(
-    mut socket: tokio::net::TcpStream,
+async fn handle_connection<S>(
+    mut socket: S,
     _peer: std::net::SocketAddr,
     store: Arc<Store>,
     broker: Broker,
     require_auth: bool,
     script_engine: Arc<lua::ScriptEngine>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut read_buf = vec![0u8; 65536];
     let mut write_buf = BytesMut::with_capacity(65536);
     let mut pending = BytesMut::new();
@@ -891,14 +941,17 @@ async fn handle_connection(
     }
 }
 
-async fn handle_block_pop(
-    socket: &mut tokio::net::TcpStream,
+async fn handle_block_pop<S>(
+    socket: &mut S,
     _store: &Arc<Store>,
     broker: &Broker,
     keys: &[String],
     timeout: std::time::Duration,
     pop_left: bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes)>(1);
     let waiter_id = broker.next_waiter_id();
 
@@ -937,8 +990,8 @@ async fn handle_block_pop(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_block_move(
-    socket: &mut tokio::net::TcpStream,
+async fn handle_block_move<S>(
+    socket: &mut S,
     store: &Arc<Store>,
     broker: &Broker,
     src: &str,
@@ -946,7 +999,10 @@ async fn handle_block_move(
     src_left: bool,
     dst_left: bool,
     timeout: std::time::Duration,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes)>(1);
     let waiter_id = broker.next_waiter_id();
 
@@ -988,8 +1044,8 @@ async fn handle_block_move(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_block_stream_read(
-    socket: &mut tokio::net::TcpStream,
+async fn handle_block_stream_read<S>(
+    socket: &mut S,
     store: &Arc<Store>,
     broker: &Broker,
     keys: &[String],
@@ -998,7 +1054,10 @@ async fn handle_block_stream_read(
     count: Option<usize>,
     noack: bool,
     timeout: std::time::Duration,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let now_pre = Instant::now();
     let resolved_ids: Vec<String> = id_strs
         .iter()
@@ -1111,13 +1170,16 @@ fn handle_eval(
     }
 }
 
-async fn handle_block_zpop(
-    socket: &mut tokio::net::TcpStream,
+async fn handle_block_zpop<S>(
+    socket: &mut S,
     store: &Arc<Store>,
     keys: &[String],
     timeout: std::time::Duration,
     pop_min: bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let deadline = tokio::time::Instant::now() + timeout;
     let mut write_buf = BytesMut::new();
 

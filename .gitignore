@@ -4,5 +4,9 @@
 sdk/node_modules/
 sdk/dist/
 
+/certs
+/.idea
+
 # nix
 /result
+
